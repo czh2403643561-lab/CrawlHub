@@ -456,6 +456,51 @@ function collectPageData() {
   };
 }
 
+function downloadCollectionFile(filename, content, mimeType) {
+  const blobUrl = URL.createObjectURL(new Blob([content], { type: mimeType }));
+  const anchor = document.createElement("a");
+  anchor.href = blobUrl;
+  anchor.download = filename;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+}
+
+function collectionCsv(result) {
+  const fields = result.field_template.filter((field) => field.available && result.records.some((record) => Object.prototype.hasOwnProperty.call(record, field.label)));
+  const escapeCell = (value) => {
+    const text = String(value ?? "");
+    return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  };
+  return [
+    fields.map((field) => escapeCell(field.label)).join(","),
+    ...result.records.map((record) => fields.map((field) => escapeCell(record[field.label])).join(","))
+  ].join("\r\n");
+}
+
+function downloadCollectionResult(format) {
+  const result = window.__crawlHubCollectionPreview;
+  if (!result) throw new Error("请先提取当前页列表数据");
+  if (format === "csv") {
+    downloadCollectionFile("collection.csv", `\uFEFF${collectionCsv(result)}`, "text/csv;charset=utf-8");
+    return;
+  }
+  downloadCollectionFile("collection.json", JSON.stringify(result, null, 2), "application/json;charset=utf-8");
+}
+
+function saveCollectionTemplate() {
+  const result = window.__crawlHubCollectionPreview;
+  if (!result) throw new Error("请先提取当前页列表数据");
+  const template = {
+    schema_version: "1.0",
+    saved_at: new Date().toISOString(),
+    source_type: result.source_type,
+    raw_columns: result.raw_columns,
+    field_template: result.field_template
+  };
+  localStorage.setItem("crawlHub.collectionTemplate.v1", JSON.stringify(template));
+  return template;
+}
+
 function startElementPicker() {
   if (window.__crawlHubPickerCleanup) window.__crawlHubPickerCleanup();
 
@@ -960,7 +1005,11 @@ function installPanel() {
       .collection-fields { max-height: 120px; margin: 0; padding: 0; overflow: auto; list-style: none; }
       .collection-fields li { margin-top: 5px; border-radius: 5px; padding: 6px 7px; background: #f6f8fc; overflow-wrap: anywhere; font-size: 12px; }
       .collection-fields li:first-child { margin-top: 0; }
-      .collection-preview { max-height: 180px; margin: 9px 0 0; padding: 8px; overflow: auto; border-radius: 6px; background: #f6f8fc; color: #344054; font: 11px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .collection-preview-table { max-height: 190px; margin-top: 9px; overflow: auto; border: 1px solid #e4e7ec; border-radius: 6px; background: #fff; }
+      .collection-preview-table table { width: 100%; border-collapse: collapse; font-size: 11px; }
+      .collection-preview-table th, .collection-preview-table td { min-width: 84px; max-width: 180px; padding: 6px; border-bottom: 1px solid #eaecf0; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+      .collection-preview-table th { position: sticky; top: 0; color: #344054; background: #f6f8fc; }
+      .collection-preview-table td { color: #475467; }
       .view[hidden], .content[hidden] { display: none; }
     </style>
     <div class="panel">
@@ -988,10 +1037,14 @@ function installPanel() {
             <p>根据表头和行列关系生成字段模板，提取当前已加载的表格或列表数据。</p>
             <div id="collectionState" class="collection-meta">尚未提取</div>
             <ul id="collectionFields" class="collection-fields"><li>字段模板：未生成</li></ul>
-            <pre id="collectionPreview" class="collection-preview">点击“提取当前页列表”查看示例数据。</pre>
+            <div id="collectionPreviewTable" class="collection-preview-table">点击“提取当前页列表”查看示例数据。</div>
+            <div id="templateStatus" class="collection-meta">字段模板尚未保存</div>
           </div>
           <div class="actions" style="margin-top: 10px;">
             <button id="extractCollection">提取当前页列表</button>
+            <button id="downloadCollectionCsv" class="secondary">导出 CSV</button>
+            <button id="downloadCollectionJson" class="secondary">导出 JSON</button>
+            <button id="saveCollectionTemplate" class="secondary">保存字段模板</button>
             <button id="backToAnalysis" class="secondary">返回页面分析</button>
           </div>
         </div>
@@ -1008,8 +1061,12 @@ function installPanel() {
   const collectionModeButton = shadow.querySelector("#collectionMode");
   const collectionState = shadow.querySelector("#collectionState");
   const collectionFields = shadow.querySelector("#collectionFields");
-  const collectionPreview = shadow.querySelector("#collectionPreview");
+  const collectionPreviewTable = shadow.querySelector("#collectionPreviewTable");
+  const templateStatus = shadow.querySelector("#templateStatus");
   const extractCollectionButton = shadow.querySelector("#extractCollection");
+  const downloadCollectionCsvButton = shadow.querySelector("#downloadCollectionCsv");
+  const downloadCollectionJsonButton = shadow.querySelector("#downloadCollectionJson");
+  const saveCollectionTemplateButton = shadow.querySelector("#saveCollectionTemplate");
   const stateText = shadow.querySelector("#state");
   const countText = shadow.querySelector("#count");
   const fieldSummary = shadow.querySelector("#fieldSummary");
@@ -1034,9 +1091,42 @@ function installPanel() {
       row.textContent = `${field.label}：${field.available ? `来自“${field.source_header}”` : "未匹配"}`;
       collectionFields.appendChild(row);
     });
-    collectionPreview.textContent = result.preview_records.length
-      ? JSON.stringify(result.preview_records, null, 2)
-      : "当前页面未识别到可提取的表格或列表数据。";
+    collectionPreviewTable.replaceChildren();
+    if (result.preview_records.length) {
+      const fields = result.field_template.filter((field) => field.available && result.preview_records.some((record) => Object.prototype.hasOwnProperty.call(record, field.label)));
+      const table = document.createElement("table");
+      const thead = document.createElement("thead");
+      const headerRow = document.createElement("tr");
+      fields.forEach((field) => {
+        const cell = document.createElement("th");
+        cell.textContent = field.label;
+        headerRow.appendChild(cell);
+      });
+      thead.appendChild(headerRow);
+      table.appendChild(thead);
+      const tbody = document.createElement("tbody");
+      result.preview_records.forEach((record) => {
+        const row = document.createElement("tr");
+        fields.forEach((field) => {
+          const cell = document.createElement("td");
+          cell.textContent = String(record[field.label] ?? "");
+          row.appendChild(cell);
+        });
+        tbody.appendChild(row);
+      });
+      table.appendChild(tbody);
+      collectionPreviewTable.appendChild(table);
+    } else {
+      collectionPreviewTable.textContent = "当前页面未识别到可提取的表格或列表数据。";
+    }
+    try {
+      templateStatus.textContent = localStorage.getItem("crawlHub.collectionTemplate.v1") ? "已有本地保存的字段模板" : "字段模板尚未保存";
+    } catch {
+      templateStatus.textContent = "当前页面不允许保存字段模板";
+    }
+    downloadCollectionCsvButton.disabled = !result.records.length;
+    downloadCollectionJsonButton.disabled = !result.records.length;
+    saveCollectionTemplateButton.disabled = !result.field_template.length;
   };
   const setMode = (mode) => {
     window.__crawlHubMode = mode;
@@ -1093,6 +1183,31 @@ function installPanel() {
       setMessage(`提取失败：${error.message || "无法读取当前页面"}`, "error");
     }
   });
+  downloadCollectionCsvButton.addEventListener("click", () => {
+    try {
+      downloadCollectionResult("csv");
+      setMessage("collection.csv 已下载。", "success");
+    } catch (error) {
+      setMessage(`CSV 导出失败：${error.message || "无法导出"}`, "error");
+    }
+  });
+  downloadCollectionJsonButton.addEventListener("click", () => {
+    try {
+      downloadCollectionResult("json");
+      setMessage("collection.json 已下载。", "success");
+    } catch (error) {
+      setMessage(`JSON 导出失败：${error.message || "无法导出"}`, "error");
+    }
+  });
+  saveCollectionTemplateButton.addEventListener("click", () => {
+    try {
+      saveCollectionTemplate();
+      templateStatus.textContent = "字段模板已保存到当前网站本地存储";
+      setMessage("字段模板已保存，仅保留字段映射，不保存页面数据。", "success");
+    } catch (error) {
+      setMessage(`模板保存失败：${error.message || "无法保存"}`, "error");
+    }
+  });
   sampleButton.addEventListener("click", () => {
     if (window.__crawlHubSamplingActive) {
       stopElementSampling();
@@ -1129,4 +1244,4 @@ function installPanel() {
   return { started: true, already_open: false };
 }
 
-window.__crawlHub = { analyzePage, collectPageData, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
+window.__crawlHub = { analyzePage, collectPageData, collectionCsv, downloadCollectionResult, saveCollectionTemplate, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
