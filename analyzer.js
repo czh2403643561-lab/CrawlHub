@@ -14,6 +14,20 @@ export function analyzePage() {
     return text.length > length ? `${text.slice(0, length)}…` : text;
   };
 
+  const safeNetworkUrl = (value) => {
+    try {
+      const url = new URL(value, location.href);
+      if (["data:", "blob:"].includes(url.protocol)) return `${url.protocol}//local`;
+      url.username = "";
+      url.password = "";
+      url.search = "";
+      url.hash = "";
+      return url.href;
+    } catch {
+      return String(value || "").split(/[?#]/, 1)[0];
+    }
+  };
+
   const selectorFor = (element) => {
     if (!(element instanceof Element)) return "";
     const parts = [];
@@ -141,12 +155,23 @@ export function analyzePage() {
   const tables = Array.from(document.querySelectorAll("table")).slice(0, LIMITS.structures).map((table) => {
     const rows = Array.from(table.querySelectorAll("tr"));
     const headers = Array.from(table.querySelectorAll("thead th, tr:first-child th")).map((cell) => compactText(cell.innerText || cell.textContent || ""));
+    const getCells = (row) => Array.from(row.children).map((cell) => compactText(cell.innerText || cell.textContent || ""));
+    const columnCount = rows.reduce((max, row) => Math.max(max, row.children.length), 0);
+    const dataRows = rows.filter((row) => !row.querySelector("th"));
+    const columns = Array.from({ length: columnCount }, (_, index) => ({
+      index,
+      name: headers[index] || `column_${index + 1}`,
+      sample_values: dataRows.slice(0, LIMITS.sampleItems).map((row) => getCells(row)[index] || "")
+    }));
     return {
       selector: selectorFor(table),
       row_count: rows.length,
-      column_count: rows.reduce((max, row) => Math.max(max, row.children.length), 0),
+      data_row_count: dataRows.length,
+      column_count: columnCount,
       headers: headers.slice(0, 30),
-      sample_rows: rows.slice(0, LIMITS.sampleItems).map((row) => Array.from(row.children).map((cell) => compactText(cell.innerText || cell.textContent || "")))
+      columns,
+      sample_rows: rows.slice(0, LIMITS.sampleItems).map(getCells),
+      sample_records: dataRows.slice(0, LIMITS.sampleItems).map((row) => Object.fromEntries(columns.map((column) => [column.name, getCells(row)[column.index] || ""])))
     };
   });
 
@@ -182,18 +207,42 @@ export function analyzePage() {
   }
 
   const networkClues = [];
+  const seenNetworkClues = new Set();
+  for (const request of Array.isArray(window.__crawlHubNetworkLog) ? window.__crawlHubNetworkLog : []) {
+    const clue = {
+      source: request.source || "runtime_observer",
+      method: request.method || null,
+      url: safeNetworkUrl(request.url),
+      response_type: request.response_type || null,
+      status: Number.isFinite(request.status) ? request.status : null,
+      content_type: request.content_type || null,
+      duration_ms: Number.isFinite(request.duration_ms) ? request.duration_ms : null
+    };
+    const key = `${clue.method}|${clue.url}|${clue.source}`;
+    if (!seenNetworkClues.has(key) && networkClues.length < LIMITS.networkClues) {
+      seenNetworkClues.add(key);
+      networkClues.push(clue);
+    }
+  }
   try {
     for (const entry of performance.getEntriesByType("resource")) {
       if (!["fetch", "xmlhttprequest"].includes(entry.initiatorType)) continue;
       if (networkClues.length >= LIMITS.networkClues) break;
-      const safeUrl = new URL(entry.name, location.href);
-      safeUrl.search = "";
-      safeUrl.hash = "";
-      networkClues.push({
-        url: safeUrl.href,
+      const clue = {
+        source: "performance",
+        method: null,
+        url: safeNetworkUrl(entry.name),
         initiator_type: entry.initiatorType,
+        response_type: null,
+        status: null,
+        content_type: null,
         duration_ms: Math.round(entry.duration)
-      });
+      };
+      const key = `${clue.method}|${clue.url}|${clue.source}`;
+      if (!seenNetworkClues.has(key)) {
+        seenNetworkClues.add(key);
+        networkClues.push(clue);
+      }
     }
   } catch {
     // Performance timing is optional in some page contexts.
@@ -299,6 +348,39 @@ export function startElementPicker() {
     return result;
   };
 
+  const siblingSummary = (element) => {
+    const siblings = element.parentElement ? Array.from(element.parentElement.children) : [];
+    const index = siblings.indexOf(element);
+    const summarize = (node) => ({
+      tag: node.tagName.toLowerCase(),
+      id: node.id || null,
+      class: compactText(node.className, 160),
+      selector: selectorFor(node),
+      text: compactText(node.innerText || node.textContent || "")
+    });
+    return {
+      position: index >= 0 ? index + 1 : null,
+      total: siblings.length,
+      previous: siblings.slice(Math.max(0, index - 3), index).map(summarize),
+      next: siblings.slice(index + 1, index + 4).map(summarize)
+    };
+  };
+
+  const guessFieldTypes = (element) => {
+    const tag = element.tagName.toLowerCase();
+    const text = compactText(element.innerText || element.textContent || "", 500);
+    const tokens = `${tag} ${element.id || ""} ${element.className || ""} ${element.getAttribute("aria-label") || ""} ${element.getAttribute("alt") || ""} ${text}`.toLowerCase();
+    const types = [];
+    if (tag === "img" || /image|img|photo|picture|图片|照片/.test(tokens)) types.push("image");
+    if (/product|item|商品|名称|name|title|标题/.test(tokens)) types.push("product_name");
+    if (/price|cost|金额|价格|售价|货币|\$|€|£|¥/.test(tokens)) types.push("price");
+    if (/count|quantity|number|total|gmv|sales|click|view|score|rating|数量|销量|点击|浏览|评分|指标/.test(tokens) || /^[-+]?\d[\d,.% ]*$/.test(text)) types.push("numeric_metric");
+    if (/percent|percentage|rate|比例|百分比|%/.test(tokens)) types.push("percentage");
+    if (tag === "a" || element.hasAttribute("href")) types.push("link");
+    if (!types.length && text) types.push("text");
+    return types;
+  };
+
   const overlay = document.createElement("div");
   overlay.textContent = "CrawlHub：点击页面元素完成选择；按 Esc 取消";
   Object.assign(overlay.style, {
@@ -354,11 +436,13 @@ export function startElementPicker() {
       selector: selectorFor(element),
       xpath: xpathFor(element),
       text: compactText(element.innerText || element.textContent || "", 500),
+      possible_field_types: guessFieldTypes(element),
       attributes: Array.from(element.attributes)
         .filter((attribute) => !["value", "src", "href", "style"].includes(attribute.name))
         .slice(0, 30)
         .map((attribute) => ({ name: attribute.name, value: compactText(attribute.value, 240) })),
       parent_structure: parentStructure(element),
+      nearby_siblings: siblingSummary(element),
       selected_at: new Date().toISOString()
     };
     cleanup();
@@ -396,4 +480,96 @@ export function startElementPicker() {
   document.addEventListener("click", onClick, true);
   document.addEventListener("keydown", onKey, true);
   return { started: true };
+}
+
+export function startNetworkObserver() {
+  if (window.__crawlHubNetworkObserverInstalled) {
+    return { started: true, already_running: true };
+  }
+
+  const sanitizeUrl = (value) => {
+    try {
+      const url = new URL(value, location.href);
+      if (["data:", "blob:"].includes(url.protocol)) return `${url.protocol}//local`;
+      url.username = "";
+      url.password = "";
+      url.search = "";
+      url.hash = "";
+      return url.href;
+    } catch {
+      return String(value || "").split(/[?#]/, 1)[0];
+    }
+  };
+  const log = Array.isArray(window.__crawlHubNetworkLog) ? window.__crawlHubNetworkLog : [];
+  const add = (request) => {
+    if (log.length >= 100) log.shift();
+    log.push({ ...request, url: sanitizeUrl(request.url), recorded_at: new Date().toISOString() });
+    window.__crawlHubNetworkLog = log;
+  };
+
+  const originalFetch = window.fetch;
+  if (typeof originalFetch === "function") {
+    window.fetch = function (...args) {
+      const input = args[0];
+      const init = args[1] || {};
+      const request = {
+        source: "fetch",
+        method: String(init.method || (input instanceof Request ? input.method : "GET")).toUpperCase(),
+        url: input instanceof Request ? input.url : String(input || ""),
+        started_at: performance.now()
+      };
+      return originalFetch.apply(this, args).then((response) => {
+        add({
+          source: request.source,
+          method: request.method,
+          url: request.url,
+          response_type: response.type || null,
+          status: response.status,
+          content_type: response.headers.get("content-type"),
+          duration_ms: Math.round(performance.now() - request.started_at)
+        });
+        return response;
+      }).catch((error) => {
+        add({
+          source: request.source,
+          method: request.method,
+          url: request.url,
+          response_type: null,
+          status: null,
+          content_type: null,
+          duration_ms: Math.round(performance.now() - request.started_at),
+          error: String(error?.message || "request_failed")
+        });
+        throw error;
+      });
+    };
+  }
+
+  const originalOpen = XMLHttpRequest.prototype.open;
+  const originalSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    this.__crawlHubRequest = { method: String(method || "GET").toUpperCase(), url: String(url || ""), started_at: performance.now() };
+    return originalOpen.call(this, method, url, ...rest);
+  };
+  XMLHttpRequest.prototype.send = function (...args) {
+    const request = this.__crawlHubRequest || { method: "GET", url: "", started_at: performance.now() };
+    this.addEventListener("loadend", () => {
+      let contentType = null;
+      try { contentType = this.getResponseHeader("content-type"); } catch { /* Header access can fail for some responses. */ }
+      add({
+        source: "xhr",
+        method: request.method,
+        url: request.url,
+        response_type: this.responseType || "text",
+        status: this.status || null,
+        content_type: contentType,
+        duration_ms: Math.round(performance.now() - request.started_at)
+      });
+    }, { once: true });
+    return originalSend.apply(this, args);
+  };
+
+  window.__crawlHubNetworkObserverInstalled = true;
+  window.__crawlHubNetworkLog = log;
+  return { started: true, already_running: false };
 }

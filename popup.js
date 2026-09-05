@@ -1,7 +1,8 @@
-import { analyzePage, startElementPicker } from "./analyzer.js";
+import { analyzePage, startElementPicker, startNetworkObserver } from "./analyzer.js";
 
 const analyzeButton = document.querySelector("#analyzeButton");
 const pickButton = document.querySelector("#pickButton");
+const observeButton = document.querySelector("#observeButton");
 const downloadButton = document.querySelector("#downloadButton");
 const status = document.querySelector("#status");
 const result = document.querySelector("#result");
@@ -13,7 +14,8 @@ const reportCounts = {
   images: document.querySelector("#imageCount"),
   lists: document.querySelector("#listCount"),
   tables: document.querySelector("#tableCount"),
-  json: document.querySelector("#jsonCount")
+  json: document.querySelector("#jsonCount"),
+  network: document.querySelector("#networkCount")
 };
 
 let latestReport = null;
@@ -30,6 +32,7 @@ function displayReport(report) {
   reportCounts.lists.textContent = report.structures.lists.length;
   reportCounts.tables.textContent = report.structures.tables.length;
   reportCounts.json.textContent = report.json_candidates.count;
+  reportCounts.network.textContent = report.network_clues.count;
   if (report.selected_element) {
     selectedElement.hidden = false;
     selectedSummary.textContent = `${report.selected_element.tag} · ${report.selected_element.selector} · ${report.selected_element.text || "无文本"}`;
@@ -46,9 +49,9 @@ async function getActiveTab() {
   return tabs[0];
 }
 
-async function executeInActiveTab(func) {
+async function executeInActiveTab(func, world = "MAIN") {
   const tab = await getActiveTab();
-  const execution = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func });
+  const execution = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func, world });
   return execution[0]?.result;
 }
 
@@ -75,6 +78,7 @@ async function downloadReport() {
 analyzeButton.addEventListener("click", async () => {
   analyzeButton.disabled = true;
   pickButton.disabled = true;
+  observeButton.disabled = true;
   downloadButton.disabled = true;
   setStatus("正在读取当前页面…");
   try {
@@ -90,12 +94,14 @@ analyzeButton.addEventListener("click", async () => {
   } finally {
     analyzeButton.disabled = false;
     pickButton.disabled = false;
+    observeButton.disabled = false;
   }
 });
 
 pickButton.addEventListener("click", async () => {
   pickButton.disabled = true;
   analyzeButton.disabled = true;
+  observeButton.disabled = true;
   setStatus("请在页面中点击要分析的元素…");
   try {
     await executeInActiveTab(startElementPicker);
@@ -104,6 +110,21 @@ pickButton.addEventListener("click", async () => {
     setStatus(`无法启动元素选择：${error.message || "当前页面不可访问"}`, "error");
     pickButton.disabled = false;
     analyzeButton.disabled = false;
+    observeButton.disabled = false;
+  }
+});
+
+observeButton.addEventListener("click", async () => {
+  observeButton.disabled = true;
+  setStatus("正在启动本地网络请求监听…");
+  try {
+    const result = await executeInActiveTab(startNetworkObserver, "MAIN");
+    if (!result?.started) throw new Error("监听器未启动。");
+    setStatus("监听已启动；操作页面后再生成报告", "success");
+  } catch (error) {
+    setStatus(`无法启动监听：${error.message || "当前页面不可访问"}`, "error");
+  } finally {
+    observeButton.disabled = false;
   }
 });
 
