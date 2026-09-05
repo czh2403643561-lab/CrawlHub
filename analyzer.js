@@ -398,7 +398,9 @@ function collectPageData() {
     return { rank: parseRankNumber(cell?.innerText || cell?.textContent || ""), rank_change: null };
   };
   const pageMetadata = () => {
-    const categoryElement = document.querySelector(".rank-arco-tag-content");
+    const categoryElement = Array.from(document.querySelectorAll(".rank-arco-tag-content, [class~='rank-arco-tag-content'], [class*='rank-arco-tag-content']"))
+      .filter(isVisible)
+      .find((element) => /\s*\/\s*/.test(compactText(element.innerText || element.textContent || "", 500)));
     const sampledCategory = compactText(categoryElement?.innerText || categoryElement?.textContent || "", 500);
     const categoryFull = sampledCategory || "未识别";
     const categoryShort = sampledCategory ? categoryFull.split(/\s*\/\s*/).filter(Boolean).at(-1) || categoryFull : "未识别";
@@ -1339,14 +1341,21 @@ function stopElementSampling() {
 }
 
 function installPanel() {
+  const panelVersion = "metadata-auto-v2";
   if (window.__crawlHubPanelHost) {
-    window.__crawlHubPanelHost.style.display = "block";
-    return { started: true, already_open: true };
+    if (window.__crawlHubPanelHost.dataset.crawlHubPanelVersion !== panelVersion) {
+      stopElementSampling();
+      window.__crawlHubPanelHost.remove();
+      delete window.__crawlHubPanelHost;
+    } else {
+      window.__crawlHubPanelHost.style.display = "block";
+      return { started: true, already_open: true };
+    }
   }
-
   if (!Array.isArray(window.__crawlHubSelectedElements)) window.__crawlHubSelectedElements = [];
   const host = document.createElement("div");
   host.id = "crawlHubPanelHost";
+  host.dataset.crawlHubPanelVersion = panelVersion;
   Object.assign(host.style, {
     all: "initial",
     position: "fixed",
