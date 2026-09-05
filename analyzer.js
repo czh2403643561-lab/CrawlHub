@@ -1392,7 +1392,7 @@ function stopElementSampling() {
 }
 
 function installPanel() {
-  const panelVersion = "intelligence-center-v2";
+  const panelVersion = "intelligence-center-v3";
   if (window.__crawlHubPanelHost) {
     if (window.__crawlHubPanelHost.dataset.crawlHubPanelVersion !== panelVersion) {
       stopElementSampling();
@@ -1485,25 +1485,29 @@ function installPanel() {
       .intelligence-note strong { color: #344054; }
       .intelligence-summary { display: flex; gap: 14px; padding: 0 20px 12px; color: #667085; font-size: 12px; }
       .intelligence-summary span { max-width: 48%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .intelligence-table-wrap { max-height: min(60vh, 650px); margin: 0 20px; overflow: auto; border: 1px solid #eaecf0; border-radius: 8px; overscroll-behavior: contain; }
-      .intelligence-table { min-width: 1560px; width: 100%; border-collapse: separate; border-spacing: 0; color: #344054; font-size: 12px; }
-      .intelligence-table th, .intelligence-table td { padding: 13px 12px; border-bottom: 1px solid #eaecf0; background: #fff; text-align: left; vertical-align: middle; }
-      .intelligence-table th { position: sticky; top: 0; z-index: 4; color: #667085; background: #f7f8fa; font-size: 12px; font-weight: 600; white-space: nowrap; }
+      .intelligence-table-wrap { max-height: min(60vh, 650px); margin: 0 20px; overflow-y: auto; overflow-x: hidden; border: 1px solid #eaecf0; border-radius: 8px; overscroll-behavior: contain; }
+      .intelligence-table-layout { display: flex; min-width: 0; align-items: stretch; }
+      .intelligence-fixed-pane { position: sticky; left: 0; z-index: 3; flex: 0 0 460px; width: 460px; background: #fff; box-shadow: 8px 0 14px -14px rgba(16,24,40,.7); }
+      .intelligence-metrics-pane { min-width: 0; flex: 1 1 auto; overflow-x: auto; overflow-y: visible; }
+      .intelligence-table { width: 100%; border-collapse: separate; border-spacing: 0; color: #344054; font-size: 12px; table-layout: fixed; }
+      .intelligence-metrics-table { min-width: 790px; table-layout: auto; }
+      .intelligence-table th, .intelligence-table td { height: 92px; padding: 10px 8px; border-bottom: 1px solid #eaecf0; background: #fff; text-align: left; vertical-align: middle; }
+      .intelligence-table th { position: sticky; top: 0; z-index: 4; height: 48px; color: #667085; background: #f7f8fa; font-size: 12px; font-weight: 600; white-space: nowrap; }
       .intelligence-table tbody tr:hover td { background: #f8fcfc; }
-      .intelligence-table .sticky-rank { position: sticky; left: 0; z-index: 3; min-width: 54px; width: 54px; text-align: center; }
-      .intelligence-table .sticky-change { position: sticky; left: 54px; z-index: 3; min-width: 66px; width: 66px; text-align: center; }
-      .intelligence-table .sticky-product { position: sticky; left: 120px; z-index: 3; min-width: 340px; width: 340px; }
-      .intelligence-table .sticky-price { position: sticky; left: 460px; z-index: 3; min-width: 145px; width: 145px; color: #475467; white-space: nowrap; }
-      .intelligence-table .sticky-rating { position: sticky; left: 605px; z-index: 3; min-width: 135px; width: 135px; box-shadow: 10px 0 14px -14px rgba(16,24,40,.7); white-space: nowrap; }
-      .intelligence-table th.sticky-rank, .intelligence-table th.sticky-change, .intelligence-table th.sticky-product, .intelligence-table th.sticky-price, .intelligence-table th.sticky-rating { z-index: 5; background: #f7f8fa; }
-      .intelligence-table tbody tr:hover .sticky-rank, .intelligence-table tbody tr:hover .sticky-change, .intelligence-table tbody tr:hover .sticky-product, .intelligence-table tbody tr:hover .sticky-price, .intelligence-table tbody tr:hover .sticky-rating { background: #f8fcfc; }
-      .intelligence-product { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
-      .intelligence-product img, .intelligence-image-placeholder { flex: 0 0 auto; width: 44px; height: 44px; border: 1px solid #e4e7ec; border-radius: 6px; background: #f2f4f7; object-fit: cover; }
-      .intelligence-product-name { display: -webkit-box; overflow: hidden; color: #172033; font-weight: 600; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+      .intelligence-fixed-table th { z-index: 5; }
+      .fixed-rank { width: 42px; text-align: center !important; }
+      .fixed-change { width: 52px; text-align: center !important; }
+      .fixed-product { width: 210px; }
+      .fixed-price { width: 96px; color: #475467; white-space: nowrap; }
+      .fixed-rating { width: 60px; color: #475467; text-align: center !important; white-space: nowrap; }
+      .intelligence-product { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+      .intelligence-product img, .intelligence-image-placeholder { flex: 0 0 auto; width: 40px; height: 40px; border: 1px solid #e4e7ec; border-radius: 6px; background: #f2f4f7; object-fit: cover; }
+      .intelligence-product-name { display: -webkit-box; overflow: hidden; color: #172033; font-weight: 600; line-height: 1.4; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
       .trend-up { color: #039855; font-weight: 600; }
       .trend-down { color: #d92d20; font-weight: 600; }
       .trend-flat { color: #98a2b3; }
-      .intelligence-metric { min-width: 142px; white-space: nowrap; }
+      .intelligence-metric { min-width: 120px; white-space: nowrap; }
+      .intelligence-shop { min-width: 150px; }
       .intelligence-actions { display: grid; gap: 5px; min-width: 112px; }
       .intelligence-actions button { border: 0; border-radius: 4px; padding: 5px 8px; color: #475467; background: #f2f4f7; cursor: default; font: inherit; font-size: 11px; white-space: nowrap; }
       .intelligence-actions button:first-child { color: #fff; background: #00a39b; }
@@ -1738,22 +1742,33 @@ function installPanel() {
       intelligenceSummary.appendChild(item);
     });
     intelligenceTable.replaceChildren();
-    const table = document.createElement("table");
-    table.className = "intelligence-table";
-    const headers = [
-      ["排名", "sticky-rank"], ["排名变化", "sticky-change"], ["商品", "sticky-product"],
-      ["价格范围", "sticky-price"], ["商品评分", "sticky-rating"], ["GMV", "intelligence-metric"],
-      ["点击次数", "intelligence-metric"], ["点击率", "intelligence-metric"], ["店铺", "intelligence-metric"],
-      ["同款商品数", "intelligence-metric"], ["商品操作", "intelligence-metric"]
-    ];
-    const head = table.createTHead();
-    const headRow = head.insertRow();
-    headers.forEach(([label, className]) => {
-      const cell = document.createElement("th");
-      cell.className = className;
-      cell.textContent = label;
-      headRow.appendChild(cell);
-    });
+    const layout = document.createElement("div");
+    layout.className = "intelligence-table-layout";
+    const fixedPane = document.createElement("div");
+    fixedPane.className = "intelligence-fixed-pane";
+    const metricsPane = document.createElement("div");
+    metricsPane.className = "intelligence-metrics-pane";
+    const createTable = (className, headers) => {
+      const table = document.createElement("table");
+      table.className = `intelligence-table ${className}`;
+      const head = table.createTHead();
+      const headRow = head.insertRow();
+      headers.forEach(([label, cellClass]) => {
+        const cell = document.createElement("th");
+        cell.className = cellClass;
+        cell.textContent = label;
+        headRow.appendChild(cell);
+      });
+      return table;
+    };
+    const fixedTable = createTable("intelligence-fixed-table", [
+      ["排名", "fixed-rank"], ["排名变化", "fixed-change"], ["商品", "fixed-product"],
+      ["价格范围", "fixed-price"], ["商品评分", "fixed-rating"]
+    ]);
+    const metricsTable = createTable("intelligence-metrics-table", [
+      ["GMV", "intelligence-metric"], ["点击次数", "intelligence-metric"], ["点击率", "intelligence-metric"],
+      ["店铺", "intelligence-metric intelligence-shop"], ["同款商品数", "intelligence-metric"], ["商品操作", "intelligence-metric"]
+    ]);
     const display = (value) => value === null || value === undefined || value === "" ? "—" : String(value);
     const trendClass = (value) => {
       const text = String(value ?? "");
@@ -1761,17 +1776,18 @@ function installPanel() {
       if (text.includes("↓")) return "trend-down";
       return "trend-flat";
     };
-    const body = table.createTBody();
+    const fixedBody = fixedTable.createTBody();
+    const metricsBody = metricsTable.createTBody();
     products.forEach((product) => {
-      const row = body.insertRow();
-      const rank = row.insertCell();
-      rank.className = "sticky-rank";
+      const fixedRow = fixedBody.insertRow();
+      const rank = fixedRow.insertCell();
+      rank.className = "fixed-rank";
       rank.textContent = display(product.rank);
-      const change = row.insertCell();
-      change.className = `sticky-change ${trendClass(product.rank_change)}`;
+      const change = fixedRow.insertCell();
+      change.className = `fixed-change ${trendClass(product.rank_change)}`;
       change.textContent = display(product.rank_change);
-      const productCell = row.insertCell();
-      productCell.className = "sticky-product";
+      const productCell = fixedRow.insertCell();
+      productCell.className = "fixed-product";
       const productInfo = document.createElement("div");
       productInfo.className = "intelligence-product";
       if (product.image) {
@@ -1792,20 +1808,25 @@ function installPanel() {
       name.textContent = display(product.product_name);
       productInfo.appendChild(name);
       productCell.appendChild(productInfo);
+      const price = fixedRow.insertCell();
+      price.className = "fixed-price";
+      price.textContent = display(product.price);
+      const rating = fixedRow.insertCell();
+      rating.className = "fixed-rating";
+      rating.textContent = display(product.rating);
+      const metricsRow = metricsBody.insertRow();
       [
-        [product.price, "sticky-price"],
-        [product.rating, "sticky-rating"],
         [product.gmv, "intelligence-metric"],
         [product.clicks, "intelligence-metric"],
         [product.ctr, "intelligence-metric"],
-        [product.shop, "intelligence-metric"],
+        [product.shop, "intelligence-metric intelligence-shop"],
         [product.similar_products, "intelligence-metric"]
       ].forEach(([value, className]) => {
-        const cell = row.insertCell();
+        const cell = metricsRow.insertCell();
         cell.className = className;
         cell.textContent = display(value);
       });
-      const actions = row.insertCell();
+      const actions = metricsRow.insertCell();
       actions.className = "intelligence-metric";
       const actionGroup = document.createElement("div");
       actionGroup.className = "intelligence-actions";
@@ -1818,7 +1839,10 @@ function installPanel() {
       });
       actions.appendChild(actionGroup);
     });
-    intelligenceTable.appendChild(table);
+    fixedPane.appendChild(fixedTable);
+    metricsPane.appendChild(metricsTable);
+    layout.append(fixedPane, metricsPane);
+    intelligenceTable.appendChild(layout);
     intelligenceFooter.textContent = `共 ${products.length} 条商品 · 可上下浏览，横向滚动查看店铺、同款商品数等指标`;
   };
   const setMode = (mode) => {
