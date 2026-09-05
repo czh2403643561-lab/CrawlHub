@@ -777,6 +777,20 @@ async function saveInternalProject(result) {
   return response.project;
 }
 
+async function readIntelligenceProject() {
+  let project = null;
+  if (window.__crawlHubCurrentProjectId) {
+    const current = await projectStorageRequest("crawlHub:read-project", { project_id: window.__crawlHubCurrentProjectId });
+    project = current.project;
+  }
+  if (!project) {
+    const latest = await projectStorageRequest("crawlHub:read-latest-project");
+    project = latest.project;
+  }
+  if (project?.project_id) window.__crawlHubCurrentProjectId = project.project_id;
+  return project;
+}
+
 function collectionXlsx(products, fields = projectProductFields) {
 
   const escapeXml = (value) => String(value ?? "")
@@ -1378,7 +1392,7 @@ function stopElementSampling() {
 }
 
 function installPanel() {
-  const panelVersion = "metadata-auto-v3";
+  const panelVersion = "intelligence-center-v1";
   if (window.__crawlHubPanelHost) {
     if (window.__crawlHubPanelHost.dataset.crawlHubPanelVersion !== panelVersion) {
       stopElementSampling();
@@ -1429,7 +1443,7 @@ function installPanel() {
       .message { min-height: 18px; margin-top: 9px; color: #667085; font-size: 12px; }
       .message.success { color: #16794c; }
       .message.error { color: #b42318; }
-      .mode-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 10px; padding: 3px; border-radius: 7px; background: #e5eaf3; }
+      .mode-switch { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-bottom: 10px; padding: 3px; border-radius: 7px; background: #e5eaf3; }
       .mode-switch button { border: 0; border-radius: 5px; padding: 7px 8px; color: #667085; background: transparent; cursor: pointer; font: inherit; font-weight: 600; }
       .mode-switch button.active { color: #315efb; background: #fff; box-shadow: 0 1px 3px rgba(16,24,40,.12); }
       .collection-card { border-radius: 7px; padding: 9px; background: #fff; color: #475467; }
@@ -1448,6 +1462,33 @@ function installPanel() {
       .collection-actions button { padding: 6px 8px; }
       .export-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
       .export-options[hidden] { display: none; }
+      .intelligence-card { overflow: hidden; border: 1px solid #e4e7ec; border-radius: 9px; background: #fff; }
+      .intelligence-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 14px 16px; border-bottom: 1px solid #eaecf0; }
+      .intelligence-header h2 { margin: 0; color: #172033; font-size: 16px; }
+      .intelligence-header p { margin: 4px 0 0; color: #667085; font-size: 12px; }
+      .intelligence-header button { flex: 0 0 auto; border: 1px solid #cdd7ff; border-radius: 6px; padding: 6px 9px; color: #315efb; background: #f5f7ff; cursor: pointer; font: inherit; font-size: 12px; }
+      .intelligence-summary { display: flex; gap: 8px; padding: 10px 16px; color: #475467; background: #f8faff; font-size: 12px; }
+      .intelligence-summary span { max-width: 46%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .intelligence-table-wrap { max-height: min(62vh, 620px); overflow: auto; }
+      .intelligence-table { min-width: 1370px; width: 100%; border-collapse: separate; border-spacing: 0; color: #344054; font-size: 12px; }
+      .intelligence-table th, .intelligence-table td { padding: 10px 12px; border-bottom: 1px solid #eaecf0; background: #fff; text-align: left; vertical-align: middle; }
+      .intelligence-table th { position: sticky; top: 0; z-index: 4; color: #475467; background: #f8fafc; font-size: 12px; font-weight: 600; white-space: nowrap; }
+      .intelligence-table tbody tr:hover td { background: #f8faff; }
+      .intelligence-table .sticky-rank { position: sticky; left: 0; z-index: 3; min-width: 58px; width: 58px; text-align: center; }
+      .intelligence-table .sticky-change { position: sticky; left: 58px; z-index: 3; min-width: 76px; width: 76px; text-align: center; }
+      .intelligence-table .sticky-product { position: sticky; left: 134px; z-index: 3; min-width: 330px; width: 330px; box-shadow: 8px 0 14px -14px rgba(16,24,40,.55); }
+      .intelligence-table th.sticky-rank, .intelligence-table th.sticky-change, .intelligence-table th.sticky-product { z-index: 5; background: #f8fafc; }
+      .intelligence-product { display: flex; align-items: center; gap: 10px; min-width: 0; }
+      .intelligence-product img, .intelligence-image-placeholder { flex: 0 0 auto; width: 42px; height: 42px; border: 1px solid #e4e7ec; border-radius: 6px; background: #f2f4f7; object-fit: cover; }
+      .intelligence-product-name { overflow: hidden; color: #172033; font-weight: 600; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+      .trend-up { color: #039855; font-weight: 600; }
+      .trend-down { color: #d92d20; font-weight: 600; }
+      .trend-flat { color: #98a2b3; }
+      .intelligence-metric { min-width: 132px; white-space: nowrap; }
+      .intelligence-actions { display: flex; gap: 5px; min-width: 220px; }
+      .intelligence-actions button { border: 1px solid #d0d5dd; border-radius: 5px; padding: 5px 7px; color: #475467; background: #fff; cursor: default; font: inherit; font-size: 11px; white-space: nowrap; }
+      .intelligence-actions button:first-child { border-color: #b9c6ff; color: #315efb; background: #f5f7ff; }
+      .intelligence-empty { padding: 32px 16px; color: #667085; text-align: center; }
       .view[hidden], .content[hidden] { display: none; }
     </style>
     <div class="panel">
@@ -1457,6 +1498,7 @@ function installPanel() {
         <div class="mode-switch" role="tablist" aria-label="工作模式">
           <button id="analysisMode" class="active" type="button">页面分析</button>
           <button id="collectionMode" type="button">数据采集</button>
+          <button id="intelligenceMode" type="button">商品情报中心</button>
         </div>
         <div id="analysisView" class="view">
           <div class="state">当前状态：<span id="state">待机</span></div>
@@ -1487,6 +1529,16 @@ function installPanel() {
             <button id="clearCollectionData" class="secondary">清除采集数据</button>
           </div>
         </div>
+        <div id="intelligenceView" class="view" hidden>
+          <div class="intelligence-card">
+            <div class="intelligence-header">
+              <div><h2>商品情报中心</h2><p id="intelligenceSubtitle">读取已保存的项目数据，集中浏览商品表现。</p></div>
+              <button id="refreshIntelligence" type="button">刷新项目数据</button>
+            </div>
+            <div id="intelligenceSummary" class="intelligence-summary"></div>
+            <div id="intelligenceTable" class="intelligence-table-wrap"></div>
+          </div>
+        </div>
         <div id="message" class="message"></div>
       </div>
     </div>`;
@@ -1496,8 +1548,14 @@ function installPanel() {
   const content = shadow.querySelector("#content");
   const analysisView = shadow.querySelector("#analysisView");
   const collectionView = shadow.querySelector("#collectionView");
+  const intelligenceView = shadow.querySelector("#intelligenceView");
   const analysisModeButton = shadow.querySelector("#analysisMode");
   const collectionModeButton = shadow.querySelector("#collectionMode");
+  const intelligenceModeButton = shadow.querySelector("#intelligenceMode");
+  const intelligenceSubtitle = shadow.querySelector("#intelligenceSubtitle");
+  const intelligenceSummary = shadow.querySelector("#intelligenceSummary");
+  const intelligenceTable = shadow.querySelector("#intelligenceTable");
+  const refreshIntelligenceButton = shadow.querySelector("#refreshIntelligence");
   const collectionState = shadow.querySelector("#collectionState");
   const metadataStatus = shadow.querySelector("#metadataStatus");
   const paginationStatus = shadow.querySelector("#paginationStatus");
@@ -1606,16 +1664,128 @@ function installPanel() {
     saveCollectionTemplateButton.disabled = !result.field_template.length;
     clearCollectionDataButton.disabled = false;
   };
+  const renderIntelligence = async () => {
+    intelligenceSubtitle.textContent = "正在读取已保存的项目数据…";
+    intelligenceSummary.replaceChildren();
+    intelligenceTable.innerHTML = '<div class="intelligence-empty">正在加载商品项目…</div>';
+    const project = await readIntelligenceProject();
+    if (window.__crawlHubMode !== "intelligence") return;
+    if (!project?.products?.length) {
+      intelligenceSubtitle.textContent = "尚未找到已保存的采集项目。请先在“数据采集”中完成至少一页采集。";
+      intelligenceTable.innerHTML = '<div class="intelligence-empty">暂无商品数据</div>';
+      return;
+    }
+    const metadata = project.metadata || {};
+    const products = project.products;
+    const category = metadata.category_full || metadata.category_short || "未识别类目";
+    intelligenceSubtitle.textContent = `${metadata.page_title || "已保存项目"} · ${products.length} 条商品`;
+    [
+      `类目：${category}`,
+      `项目：${project.project_id || "当前项目"}`,
+      `采集时间：${metadata.created_at ? new Date(metadata.created_at).toLocaleString() : "未识别"}`
+    ].forEach((text) => {
+      const item = document.createElement("span");
+      item.textContent = text;
+      intelligenceSummary.appendChild(item);
+    });
+    intelligenceTable.replaceChildren();
+    const table = document.createElement("table");
+    table.className = "intelligence-table";
+    const headers = [
+      ["排名", "sticky-rank"], ["排名变化", "sticky-change"], ["商品", "sticky-product"],
+      ["价格范围", "intelligence-metric"], ["商品评分", "intelligence-metric"], ["GMV", "intelligence-metric"],
+      ["点击次数", "intelligence-metric"], ["点击率", "intelligence-metric"], ["店铺", "intelligence-metric"],
+      ["同款商品数", "intelligence-metric"], ["商品操作", "intelligence-metric"]
+    ];
+    const head = table.createTHead();
+    const headRow = head.insertRow();
+    headers.forEach(([label, className]) => {
+      const cell = document.createElement("th");
+      cell.className = className;
+      cell.textContent = label;
+      headRow.appendChild(cell);
+    });
+    const display = (value) => value === null || value === undefined || value === "" ? "—" : String(value);
+    const trendClass = (value) => {
+      const text = String(value ?? "");
+      if (text.includes("↑")) return "trend-up";
+      if (text.includes("↓")) return "trend-down";
+      return "trend-flat";
+    };
+    const body = table.createTBody();
+    products.forEach((product) => {
+      const row = body.insertRow();
+      const rank = row.insertCell();
+      rank.className = "sticky-rank";
+      rank.textContent = display(product.rank);
+      const change = row.insertCell();
+      change.className = `sticky-change ${trendClass(product.rank_change)}`;
+      change.textContent = display(product.rank_change);
+      const productCell = row.insertCell();
+      productCell.className = "sticky-product";
+      const productInfo = document.createElement("div");
+      productInfo.className = "intelligence-product";
+      if (product.image) {
+        const image = document.createElement("img");
+        image.src = product.image;
+        image.alt = "商品图片";
+        image.loading = "lazy";
+        image.addEventListener("error", () => image.replaceWith(Object.assign(document.createElement("div"), { className: "intelligence-image-placeholder" })));
+        productInfo.appendChild(image);
+      } else {
+        const placeholder = document.createElement("div");
+        placeholder.className = "intelligence-image-placeholder";
+        productInfo.appendChild(placeholder);
+      }
+      const name = document.createElement("div");
+      name.className = "intelligence-product-name";
+      name.title = display(product.product_name);
+      name.textContent = display(product.product_name);
+      productInfo.appendChild(name);
+      productCell.appendChild(productInfo);
+      [product.price, product.rating, product.gmv, product.clicks, product.ctr, product.shop, product.similar_products].forEach((value) => {
+        const cell = row.insertCell();
+        cell.className = "intelligence-metric";
+        cell.textContent = display(value);
+      });
+      const actions = row.insertCell();
+      actions.className = "intelligence-metric";
+      const actionGroup = document.createElement("div");
+      actionGroup.className = "intelligence-actions";
+      ["AI分析", "找货源", "收藏"].forEach((label) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.title = "功能即将开放";
+        button.textContent = label;
+        actionGroup.appendChild(button);
+      });
+      actions.appendChild(actionGroup);
+    });
+    intelligenceTable.appendChild(table);
+  };
   const setMode = (mode) => {
     window.__crawlHubMode = mode;
     const isAnalysis = mode === "analysis";
+    const isCollection = mode === "collection";
+    const isIntelligence = mode === "intelligence";
     analysisView.hidden = !isAnalysis;
-    collectionView.hidden = isAnalysis;
+    collectionView.hidden = !isCollection;
+    intelligenceView.hidden = !isIntelligence;
     analysisModeButton.classList.toggle("active", isAnalysis);
-    collectionModeButton.classList.toggle("active", !isAnalysis);
+    collectionModeButton.classList.toggle("active", isCollection);
+    intelligenceModeButton.classList.toggle("active", isIntelligence);
+    host.style.width = isIntelligence ? "min(1180px, calc(100vw - 32px))" : "360px";
     if (!isAnalysis && window.__crawlHubSamplingActive) stopElementSampling();
     render();
     renderCollection();
+    if (isIntelligence) {
+      renderIntelligence().catch((error) => {
+        if (window.__crawlHubMode !== "intelligence") return;
+        intelligenceSubtitle.textContent = "无法读取本地项目数据。";
+        intelligenceTable.innerHTML = '<div class="intelligence-empty">请重新打开插件面板后再试。</div>';
+        setMessage(`项目读取失败：${error.message || "无法读取"}`, "error");
+      });
+    }
   };
   const render = () => {
     const selected = Array.isArray(window.__crawlHubSelectedElements) ? window.__crawlHubSelectedElements : [];
@@ -1649,6 +1819,13 @@ function installPanel() {
   collectionModeButton.addEventListener("click", () => {
     setMode("collection");
     setMessage("可提取当前页已加载的数据；不会翻页或发送页面数据。", "success");
+  });
+  intelligenceModeButton.addEventListener("click", () => {
+    setMode("intelligence");
+    setMessage("商品情报中心只读取已保存项目，不会重新采集页面。", "success");
+  });
+  refreshIntelligenceButton.addEventListener("click", () => {
+    renderIntelligence().catch((error) => setMessage(`项目读取失败：${error.message || "无法读取"}`, "error"));
   });
   collectCollectionButton.addEventListener("click", async () => {
     try {
@@ -1734,6 +1911,6 @@ function installPanel() {
   return { started: true, already_open: false };
 }
 
-window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, collectCurrentPage, clearCollectionData, collectionXlsx, exportCollectionProject, saveCollectionTemplate, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
+window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, collectCurrentPage, clearCollectionData, collectionXlsx, collectionProjectData, exportCollectionProject, readIntelligenceProject, saveCollectionTemplate, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
 
 })();
