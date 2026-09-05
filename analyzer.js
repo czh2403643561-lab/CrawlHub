@@ -557,9 +557,38 @@ function detectPaginationState() {
   };
 }
 
+function collectionEnvironment(result, pagination) {
+  return {
+    page: `${location.origin || ""}${location.pathname || ""}`,
+    title: document.title || "",
+    source_type: result.source_type,
+    columns: result.raw_columns.map((column) => ({ header: column.header, column_index: column.column_index })),
+    fields: result.field_template.map((field) => ({ key: field.key, source_header: field.source_header, column_index: field.column_index, available: field.available })),
+    total_items: pagination.total_items,
+    items_per_page: pagination.items_per_page
+  };
+}
+
+function clearCollectionData() {
+  window.__crawlHubManualCollectionPages = [];
+  delete window.__crawlHubCollectionPreview;
+  delete window.__crawlHubManualCollectionState;
+  delete window.__crawlHubCollectionEnvironment;
+  delete window.__crawlHubPaginationState;
+  return { cleared: true };
+}
+
 function collectCurrentPage() {
   const result = collectPageData();
   const pagination = detectPaginationState();
+  const environment = collectionEnvironment(result, pagination);
+  const existingPages = Array.isArray(window.__crawlHubManualCollectionPages) ? window.__crawlHubManualCollectionPages : [];
+  const previousEnvironment = window.__crawlHubCollectionEnvironment;
+  if (existingPages.length && previousEnvironment && previousEnvironment.signature !== JSON.stringify(environment)) {
+    const confirmed = window.confirm("当前分页数量或页面采集环境已变化。\n是否开始新的采集任务？\n\n确认后将清除旧的已采集数据和当前进度。\n字段模板不会删除。");
+    if (!confirmed) return { cancelled: true, result: window.__crawlHubCollectionPreview || null, pagination, duplicate: false };
+    clearCollectionData();
+  }
   const pageKey = pagination.current_page ? `page:${pagination.current_page}` : `records:${JSON.stringify(result.records)}`;
   if (!Array.isArray(window.__crawlHubManualCollectionPages)) window.__crawlHubManualCollectionPages = [];
   const alreadyCollected = window.__crawlHubManualCollectionPages.some((page) => page.key === pageKey);
@@ -593,6 +622,10 @@ function collectCurrentPage() {
       collected_pages: pages.length
     }
   };
+  window.__crawlHubCollectionEnvironment = { ...environment, signature: JSON.stringify(environment) };
+  window.__crawlHubCollectionFieldTemplate = result.field_template;
+  window.__crawlHubCollectionRawColumns = result.raw_columns;
+  window.__crawlHubCollectionSourceType = result.source_type;
   window.__crawlHubCollectionPreview = merged;
   window.__crawlHubManualCollectionState = {
     last_page: pagination.current_page,
@@ -600,7 +633,7 @@ function collectCurrentPage() {
     collected_items: records.length,
     duplicate: alreadyCollected
   };
-  return { result: merged, pagination, duplicate: alreadyCollected };
+  return { result: merged, pagination, duplicate: alreadyCollected, cancelled: false };
 }
 
 function downloadCollectionFile(filename, content, mimeType) {
@@ -746,13 +779,14 @@ function downloadCollectionResult(format) {
 
 function saveCollectionTemplate() {
   const result = window.__crawlHubCollectionPreview;
-  if (!result) throw new Error("请先提取当前页列表数据");
+  const fieldTemplate = result?.field_template || window.__crawlHubCollectionFieldTemplate || [];
+  if (!fieldTemplate.length) throw new Error("请先生成字段模板");
   const template = {
     schema_version: "1.0",
     saved_at: new Date().toISOString(),
-    source_type: result.source_type,
-    raw_columns: result.raw_columns,
-    field_template: result.field_template
+    source_type: result?.source_type || window.__crawlHubCollectionSourceType || null,
+    raw_columns: result?.raw_columns || window.__crawlHubCollectionRawColumns || [],
+    field_template: fieldTemplate
   };
   localStorage.setItem("crawlHub.collectionTemplate.v1", JSON.stringify(template));
   return template;
@@ -1311,6 +1345,7 @@ function installPanel() {
               <button id="downloadCollectionXlsx" class="secondary">Excel</button>
             </div>
             <button id="saveCollectionTemplate" class="secondary">保存字段模板</button>
+            <button id="clearCollectionData" class="secondary">清除采集数据</button>
           </div>
         </div>
         <div id="message" class="message"></div>
@@ -1336,6 +1371,7 @@ function installPanel() {
   const downloadCollectionJsonButton = shadow.querySelector("#downloadCollectionJson");
   const downloadCollectionXlsxButton = shadow.querySelector("#downloadCollectionXlsx");
   const saveCollectionTemplateButton = shadow.querySelector("#saveCollectionTemplate");
+  const clearCollectionDataButton = shadow.querySelector("#clearCollectionData");
   const stateText = shadow.querySelector("#state");
   const countText = shadow.querySelector("#count");
   const fieldSummary = shadow.querySelector("#fieldSummary");
@@ -1349,9 +1385,24 @@ function installPanel() {
     message.textContent = text;
     message.className = `message ${kind}`.trim();
   };
+  const renderFieldTemplate = (fields) => {
+    collectionFields.replaceChildren();
+    if (!fields.length) {
+      const row = document.createElement("li");
+      row.textContent = "字段模板：未生成";
+      collectionFields.appendChild(row);
+      return;
+    }
+    fields.forEach((field) => {
+      const row = document.createElement("li");
+      row.textContent = `${field.label}：${field.available ? `来自“${field.source_header}”` : "未匹配"}`;
+      collectionFields.appendChild(row);
+    });
+  };
   const renderCollection = () => {
     const result = window.__crawlHubCollectionPreview;
     const manualState = window.__crawlHubManualCollectionState;
+    const fieldTemplate = result?.field_template || window.__crawlHubCollectionFieldTemplate || [];
     const pageState = detectPaginationState();
     const pageText = pageState.current_page && pageState.total_pages
       ? `当前：第${pageState.current_page}页 / ${pageState.total_pages}页`
@@ -1359,24 +1410,28 @@ function installPanel() {
     paginationStatus.textContent = pageText;
     if (!result) {
       collectionState.textContent = "尚未采集";
+      renderFieldTemplate(fieldTemplate);
+      collectionPreviewTable.textContent = fieldTemplate.length ? "字段模板已保留，点击“采集当前页”生成新结果。" : "点击“采集当前页”查看示例数据。";
+      try {
+        templateStatus.textContent = localStorage.getItem("crawlHub.collectionTemplate.v1") ? "已有本地保存的字段模板" : fieldTemplate.length ? "当前字段模板已保留，尚未保存" : "字段模板尚未保存";
+      } catch {
+        templateStatus.textContent = "当前页面不允许保存字段模板";
+      }
       collectCollectionButton.disabled = false;
       toggleExportsButton.disabled = true;
       exportOptions.hidden = true;
       downloadCollectionCsvButton.disabled = true;
       downloadCollectionJsonButton.disabled = true;
       downloadCollectionXlsxButton.disabled = true;
+      saveCollectionTemplateButton.disabled = !fieldTemplate.length;
+      clearCollectionDataButton.disabled = true;
       return;
     }
     const sourceLabel = result.source_type === "table" ? "表格" : result.source_type === "list" ? "列表" : result.source_type === "paginated_table" || result.source_type === "manual_paginated_table" ? "分页表格" : "未找到可提取的表格或列表";
     collectionState.textContent = manualState?.last_page
       ? `✓ 第${manualState.last_page}页完成 · 已采集${result.item_count}条${manualState.duplicate ? "（本页已采集，未重复计数）" : ""}`
       : `${sourceLabel} · 当前页商品/条目数量：${result.item_count}`;
-    collectionFields.replaceChildren();
-    result.field_template.forEach((field) => {
-      const row = document.createElement("li");
-      row.textContent = `${field.label}：${field.available ? `来自“${field.source_header}”` : "未匹配"}`;
-      collectionFields.appendChild(row);
-    });
+    renderFieldTemplate(result.field_template);
     collectionPreviewTable.replaceChildren();
     if (result.preview_records.length) {
       const fields = result.field_template.filter((field) => field.available && result.preview_records.some((record) => Object.prototype.hasOwnProperty.call(record, field.label)));
@@ -1416,6 +1471,7 @@ function installPanel() {
     downloadCollectionJsonButton.disabled = !result.records.length;
     downloadCollectionXlsxButton.disabled = !result.records.length;
     saveCollectionTemplateButton.disabled = !result.field_template.length;
+    clearCollectionDataButton.disabled = false;
   };
   const setMode = (mode) => {
     window.__crawlHubMode = mode;
@@ -1465,6 +1521,11 @@ function installPanel() {
     try {
       setMessage("采集中…");
       const collected = collectCurrentPage();
+      if (collected.cancelled) {
+        renderCollection();
+        setMessage("已取消新采集任务，原采集结果保留。", "success");
+        return;
+      }
       renderCollection();
       setMessage(collected.duplicate ? "✓ 当前页完成：本页已采集，未重复计数。" : `✓ 当前页完成：已采集 ${collected.result.item_count} 条。`, "success");
     } catch (error) {
@@ -1472,6 +1533,14 @@ function installPanel() {
     }
   });
   toggleExportsButton.addEventListener("click", () => { exportOptions.hidden = !exportOptions.hidden; });
+  clearCollectionDataButton.addEventListener("click", () => {
+    if (!window.__crawlHubCollectionPreview && !window.__crawlHubManualCollectionPages?.length) return;
+    const confirmed = window.confirm("确认清除当前采集结果？\n\n将删除：\n- 已采集数据\n- 当前进度\n\n不会删除字段模板。");
+    if (!confirmed) return;
+    clearCollectionData();
+    renderCollection();
+    setMessage("采集数据已清除，字段模板已保留。", "success");
+  });
   downloadCollectionCsvButton.addEventListener("click", () => {
     try {
       downloadCollectionResult("csv");
@@ -1541,4 +1610,4 @@ function installPanel() {
   return { started: true, already_open: false };
 }
 
-window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, collectCurrentPage, collectionCsv, collectionXlsx, downloadCollectionResult, saveCollectionTemplate, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
+window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, collectCurrentPage, clearCollectionData, collectionCsv, collectionXlsx, downloadCollectionResult, saveCollectionTemplate, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
