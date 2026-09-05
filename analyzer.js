@@ -1,4 +1,4 @@
-export function analyzePage() {
+function analyzePage() {
   const LIMITS = {
     textNodes: 2000,
     images: 500,
@@ -84,7 +84,9 @@ export function analyzePage() {
     return ancestors;
   };
 
-  const selectedElement = window.__crawlHubSelectedElement || null;
+  const selectedElements = Array.isArray(window.__crawlHubSelectedElements)
+    ? window.__crawlHubSelectedElements
+    : (window.__crawlHubSelectedElement ? [window.__crawlHubSelectedElement] : []);
   const countByTag = {};
   let elementCount = 0;
   let maxDepth = 0;
@@ -271,7 +273,12 @@ export function analyzePage() {
       top_level_elements: topLevelElements,
       landmark_counts: Object.fromEntries(["header", "nav", "main", "aside", "footer", "form"].map((tag) => [tag, countByTag[tag] || 0]))
     },
-    selected_element: selectedElement,
+    selected_element: selectedElements[0] || null,
+    selected_elements: selectedElements,
+    sampling: {
+      selected_count: selectedElements.length,
+      mode: window.__crawlHubSamplingActive ? "sampling" : "idle"
+    },
     text_nodes: { items: textNodes, count: textNodes.length, omitted_count: omittedTextNodes },
     images: { items: images, count: images.length, omitted_count: Math.max(0, document.images.length - images.length) },
     structures: {
@@ -295,7 +302,7 @@ export function analyzePage() {
   };
 }
 
-export function startElementPicker() {
+function startElementPicker() {
   if (window.__crawlHubPickerCleanup) window.__crawlHubPickerCleanup();
 
   const compactText = (value, length = 240) => {
@@ -482,7 +489,7 @@ export function startElementPicker() {
   return { started: true };
 }
 
-export function startNetworkObserver() {
+function startNetworkObserver() {
   if (window.__crawlHubNetworkObserverInstalled) {
     return { started: true, already_running: true };
   }
@@ -573,3 +580,318 @@ export function startNetworkObserver() {
   window.__crawlHubNetworkLog = log;
   return { started: true, already_running: false };
 }
+
+function startElementSampling() {
+  if (window.__crawlHubSamplingCleanup) window.__crawlHubSamplingCleanup();
+  window.__crawlHubSamplingActive = true;
+  window.__crawlHubSelectedElements = [];
+
+  const compactText = (value, length = 240) => {
+    const text = String(value || "").replace(/\s+/g, " ").trim();
+    return text.length > length ? `${text.slice(0, length)}…` : text;
+  };
+  const selectorFor = (element) => {
+    const parts = [];
+    let current = element;
+    while (current && current.nodeType === Node.ELEMENT_NODE && parts.length < 6) {
+      let part = current.tagName.toLowerCase();
+      if (current.id) part += `#${current.id.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+      else if (current.classList.length) part += `.${Array.from(current.classList).slice(0, 2).join(".")}`;
+      parts.unshift(part);
+      current = current.parentElement;
+    }
+    return parts.join(" > ");
+  };
+  const xpathFor = (element) => {
+    const parts = [];
+    let current = element;
+    while (current && current.nodeType === Node.ELEMENT_NODE) {
+      let index = 1;
+      let sibling = current.previousElementSibling;
+      while (sibling) {
+        if (sibling.tagName === current.tagName) index += 1;
+        sibling = sibling.previousElementSibling;
+      }
+      parts.unshift(`${current.tagName.toLowerCase()}[${index}]`);
+      current = current.parentElement;
+    }
+    return `/${parts.join("/")}`;
+  };
+  const summarize = (element) => ({
+    tag: element.tagName.toLowerCase(),
+    id: element.id || null,
+    class: compactText(element.className, 160),
+    selector: selectorFor(element),
+    text: compactText(element.innerText || element.textContent || "")
+  });
+  const parentStructure = (element) => {
+    const result = [];
+    let current = element.parentElement;
+    while (current && result.length < 5) {
+      result.push(summarize(current));
+      current = current.parentElement;
+    }
+    return result;
+  };
+  const nearbySiblings = (element) => {
+    const siblings = element.parentElement ? Array.from(element.parentElement.children) : [];
+    const index = siblings.indexOf(element);
+    return {
+      position: index >= 0 ? index + 1 : null,
+      total: siblings.length,
+      previous: siblings.slice(Math.max(0, index - 3), index).map(summarize),
+      next: siblings.slice(index + 1, index + 4).map(summarize)
+    };
+  };
+  const guessFieldTypes = (element) => {
+    const tag = element.tagName.toLowerCase();
+    const text = compactText(element.innerText || element.textContent || "", 500);
+    const tokens = `${tag} ${element.id || ""} ${element.className || ""} ${element.getAttribute("aria-label") || ""} ${element.getAttribute("alt") || ""} ${text}`.toLowerCase();
+    const types = [];
+    if (tag === "img" || /image|img|photo|picture|图片|照片/.test(tokens)) types.push("image");
+    if (/product|item|商品|名称|name|title|标题/.test(tokens)) types.push("product_name");
+    if (/price|cost|金额|价格|售价|货币|\$|€|£|¥/.test(tokens)) types.push("price");
+    if (/count|quantity|number|total|gmv|sales|click|view|score|rating|数量|销量|点击|浏览|评分|指标/.test(tokens) || /^[-+]?\d[\d,.% ]*$/.test(text)) types.push("numeric_metric");
+    if (/percent|percentage|rate|比例|百分比|%/.test(tokens)) types.push("percentage");
+    if (tag === "a" || element.hasAttribute("href")) types.push("link");
+    if (!types.length && text) types.push("text");
+    return types;
+  };
+  const describe = (element) => ({
+    tag: element.tagName.toLowerCase(),
+    class: compactText(element.className, 240),
+    id: element.id || null,
+    selector: selectorFor(element),
+    xpath: xpathFor(element),
+    text: compactText(element.innerText || element.textContent || "", 500),
+    possible_field_types: guessFieldTypes(element),
+    parent_structure: parentStructure(element),
+    nearby_siblings: nearbySiblings(element),
+    attributes: Array.from(element.attributes)
+      .filter((attribute) => !["value", "src", "href", "style"].includes(attribute.name))
+      .slice(0, 30)
+      .map((attribute) => ({ name: attribute.name, value: compactText(attribute.value, 240) })),
+    selected_at: new Date().toISOString()
+  });
+
+  const notice = document.createElement("div");
+  notice.textContent = "CrawlHub：采样中，点击多个页面元素；完成后回到面板结束";
+  Object.assign(notice.style, {
+    position: "fixed",
+    zIndex: "2147483647",
+    top: "12px",
+    left: "50%",
+    transform: "translateX(-50%)",
+    padding: "8px 12px",
+    borderRadius: "6px",
+    color: "#fff",
+    background: "#315efb",
+    font: "12px sans-serif",
+    pointerEvents: "none",
+    boxShadow: "0 2px 10px rgba(0,0,0,.25)"
+  });
+  document.documentElement.appendChild(notice);
+  const highlight = document.createElement("div");
+  Object.assign(highlight.style, {
+    position: "fixed",
+    zIndex: "2147483646",
+    pointerEvents: "none",
+    border: "2px solid #315efb",
+    background: "rgba(49,94,251,.12)",
+    display: "none"
+  });
+  document.documentElement.appendChild(highlight);
+
+  const isPanelTarget = (event) => {
+    const panelHost = window.__crawlHubPanelHost;
+    return panelHost && typeof event.composedPath === "function" && event.composedPath().includes(panelHost);
+  };
+  const onMove = (event) => {
+    if (isPanelTarget(event)) return;
+    const element = event.target instanceof Element ? event.target : null;
+    if (!element) return;
+    const rect = element.getBoundingClientRect();
+    Object.assign(highlight.style, {
+      display: "block",
+      top: `${rect.top}px`,
+      left: `${rect.left}px`,
+      width: `${rect.width}px`,
+      height: `${rect.height}px`
+    });
+  };
+  const onClick = (event) => {
+    if (isPanelTarget(event) || !(event.target instanceof Element)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const item = describe(event.target);
+    if (!window.__crawlHubSelectedElements.some((selected) => selected.xpath === item.xpath)) {
+      window.__crawlHubSelectedElements.push(item);
+      if (window.__crawlHubSamplingChanged) window.__crawlHubSamplingChanged();
+      notice.textContent = `CrawlHub：已选择 ${window.__crawlHubSelectedElements.length} 个元素，继续点击或完成采样`;
+    }
+  };
+  const cleanup = () => {
+    document.removeEventListener("mousemove", onMove, true);
+    document.removeEventListener("click", onClick, true);
+    notice.remove();
+    highlight.remove();
+    window.__crawlHubSamplingActive = false;
+    delete window.__crawlHubSamplingCleanup;
+  };
+
+  window.__crawlHubSamplingCleanup = cleanup;
+  document.addEventListener("mousemove", onMove, true);
+  document.addEventListener("click", onClick, true);
+  return { started: true };
+}
+
+function stopElementSampling() {
+  if (window.__crawlHubSamplingCleanup) window.__crawlHubSamplingCleanup();
+  window.__crawlHubSamplingActive = false;
+  return { stopped: true, selected_count: Array.isArray(window.__crawlHubSelectedElements) ? window.__crawlHubSelectedElements.length : 0 };
+}
+
+function installPanel() {
+  if (window.__crawlHubPanelHost) {
+    window.__crawlHubPanelHost.style.display = "block";
+    return { started: true, already_open: true };
+  }
+
+  if (!Array.isArray(window.__crawlHubSelectedElements)) window.__crawlHubSelectedElements = [];
+  const host = document.createElement("div");
+  host.id = "crawlHubPanelHost";
+  Object.assign(host.style, {
+    all: "initial",
+    position: "fixed",
+    zIndex: "2147483645",
+    top: "16px",
+    right: "16px",
+    width: "360px",
+    maxWidth: "calc(100vw - 32px)",
+    color: "#172033",
+    font: "13px/1.45 Arial, sans-serif"
+  });
+  const shadow = host.attachShadow({ mode: "open" });
+  shadow.innerHTML = `
+    <style>
+      :host { all: initial; }
+      * { box-sizing: border-box; }
+      .panel { overflow: hidden; border: 1px solid #d9e0ed; border-radius: 10px; background: #f6f8fc; box-shadow: 0 8px 30px rgba(16, 24, 40, .22); }
+      header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; color: #fff; background: #315efb; }
+      header strong { flex: 1; font-size: 14px; }
+      header button { width: 24px; height: 24px; border: 0; border-radius: 5px; color: #fff; background: rgba(255,255,255,.18); cursor: pointer; font-size: 16px; line-height: 20px; }
+      .content { padding: 12px; }
+      .hint { margin-bottom: 10px; color: #667085; font-size: 12px; }
+      .state { margin-bottom: 8px; font-weight: 600; }
+      .state span { color: #16794c; }
+      .count { margin-bottom: 8px; color: #344054; }
+      .field-summary { min-height: 20px; margin-bottom: 10px; color: #475467; font-size: 12px; }
+      .samples { max-height: 180px; margin: 0 0 12px; padding: 0; overflow: auto; list-style: none; }
+      .samples li { margin-top: 6px; border-radius: 6px; padding: 7px 8px; background: #fff; overflow-wrap: anywhere; }
+      .samples li:first-child { margin-top: 0; }
+      .actions { display: grid; gap: 7px; }
+      .actions button { width: 100%; border: 0; border-radius: 7px; padding: 8px 10px; color: #fff; background: #315efb; cursor: pointer; font: inherit; font-weight: 600; }
+      .actions button.secondary { color: #315efb; background: #e8edff; }
+      .actions button:disabled { cursor: default; opacity: .6; }
+      .message { min-height: 18px; margin-top: 9px; color: #667085; font-size: 12px; }
+      .message.success { color: #16794c; }
+      .message.error { color: #b42318; }
+    </style>
+    <div class="panel">
+      <header><strong>CrawlHub 页面分析</strong><button id="minimize" title="最小化">−</button><button id="close" title="关闭">×</button></header>
+      <div id="content" class="content">
+        <div class="hint">数据仅在本地处理，不记录响应内容。</div>
+        <div class="state">当前状态：<span id="state">待机</span></div>
+        <div class="count">已选择元素：<strong id="count">0</strong></div>
+        <div id="fieldSummary" class="field-summary">已选择字段摘要：暂无</div>
+        <ul id="samples" class="samples"></ul>
+        <div class="actions">
+          <button id="sample">开始元素采样</button>
+          <button id="observe" class="secondary">监听后续网络请求</button>
+          <button id="analyze" class="secondary">分析并下载 analysis.json</button>
+        </div>
+        <div id="message" class="message"></div>
+      </div>
+    </div>`;
+  document.documentElement.appendChild(host);
+  window.__crawlHubPanelHost = host;
+
+  const content = shadow.querySelector("#content");
+  const stateText = shadow.querySelector("#state");
+  const countText = shadow.querySelector("#count");
+  const fieldSummary = shadow.querySelector("#fieldSummary");
+  const samples = shadow.querySelector("#samples");
+  const sampleButton = shadow.querySelector("#sample");
+  const observeButton = shadow.querySelector("#observe");
+  const analyzeButton = shadow.querySelector("#analyze");
+  const message = shadow.querySelector("#message");
+
+  const setMessage = (text, kind = "") => {
+    message.textContent = text;
+    message.className = `message ${kind}`.trim();
+  };
+  const render = () => {
+    const selected = Array.isArray(window.__crawlHubSelectedElements) ? window.__crawlHubSelectedElements : [];
+    countText.textContent = String(selected.length);
+    stateText.textContent = window.__crawlHubSamplingActive ? "元素采样中" : "待机";
+    const fields = Array.from(new Set(selected.flatMap((item) => item.possible_field_types || [])));
+    fieldSummary.textContent = `已选择字段摘要：${fields.length ? fields.join("、") : "暂无"}`;
+    samples.replaceChildren();
+    selected.forEach((item, index) => {
+      const row = document.createElement("li");
+      row.textContent = `${index + 1}. ${item.tag} · ${item.possible_field_types?.join("/") || "text"} · ${item.text || item.selector}`;
+      samples.appendChild(row);
+    });
+    sampleButton.textContent = window.__crawlHubSamplingActive ? "完成采样并生成报告" : "开始元素采样";
+    observeButton.textContent = window.__crawlHubNetworkObserverInstalled ? "网络监听已开启" : "监听后续网络请求";
+    observeButton.disabled = Boolean(window.__crawlHubNetworkObserverInstalled);
+  };
+  const downloadReport = () => {
+    const report = analyzePage();
+    const blobUrl = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }));
+    const anchor = document.createElement("a");
+    anchor.href = blobUrl;
+    anchor.download = "analysis.json";
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    setMessage("分析完成，analysis.json 已下载", "success");
+  };
+
+  window.__crawlHubSamplingChanged = render;
+  sampleButton.addEventListener("click", () => {
+    if (window.__crawlHubSamplingActive) {
+      stopElementSampling();
+      render();
+      downloadReport();
+      return;
+    }
+    startElementSampling();
+    render();
+    setMessage("请连续点击页面元素，完成后点击“完成采样并生成报告”。");
+  });
+  observeButton.addEventListener("click", () => {
+    try {
+      startNetworkObserver();
+      render();
+      setMessage("网络监听已启动，只记录后续请求元信息。", "success");
+    } catch (error) {
+      setMessage(`监听失败：${error.message || "无法启动"}`, "error");
+    }
+  });
+  analyzeButton.addEventListener("click", () => {
+    try { downloadReport(); } catch (error) { setMessage(`分析失败：${error.message || "无法生成报告"}`, "error"); }
+  });
+  shadow.querySelector("#minimize").addEventListener("click", () => {
+    content.hidden = !content.hidden;
+  });
+  shadow.querySelector("#close").addEventListener("click", () => {
+    stopElementSampling();
+    host.remove();
+    delete window.__crawlHubPanelHost;
+    delete window.__crawlHubSamplingChanged;
+  });
+  render();
+  return { started: true, already_open: false };
+}
+
+window.__crawlHub = { analyzePage, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
