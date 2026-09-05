@@ -398,19 +398,29 @@ function collectPageData() {
     return { rank: parseRankNumber(cell?.innerText || cell?.textContent || ""), rank_change: null };
   };
   const pageMetadata = () => {
-    const selected = Array.isArray(window.__crawlHubSelectedElements) ? window.__crawlHubSelectedElements : [];
-    const categoryFull = selected
-      .map((item) => {
-        const element = item.selector ? document.querySelector(item.selector) : null;
-        return compactText(element?.innerText || element?.textContent || item.text || "", 500);
-      })
-      .find((text) => text.split(/\s*\/\s*/).filter(Boolean).length >= 2) || null;
+    const categoryElement = document.querySelector(".rank-arco-tag-content");
+    const sampledCategory = compactText(categoryElement?.innerText || categoryElement?.textContent || "", 500);
+    const categoryFull = sampledCategory || "未识别";
+    const categoryShort = sampledCategory ? categoryFull.split(/\s*\/\s*/).filter(Boolean).at(-1) || categoryFull : "未识别";
     const pageHeading = Array.from(document.querySelectorAll("h1")).find(isVisible);
+    const rankTypeLabels = ["总榜", "直播榜", "短视频榜", "商品卡", "达人榜", "新品榜"];
+    const rankTypeElement = Array.from(document.querySelectorAll("[role='tab'], button, a, [class*='tab']"))
+      .filter(isVisible)
+      .find((element) => {
+        const text = compactText(element.innerText || element.textContent || "", 80);
+        const active = element.getAttribute("aria-selected") === "true"
+          || element.getAttribute("aria-current") === "page"
+          || /(?:^|[-_\s])(active|selected|current)(?:$|[-_\s])/i.test(String(element.className || ""));
+        return active && rankTypeLabels.includes(text);
+      });
+    const rankType = rankTypeElement ? compactText(rankTypeElement.innerText || rankTypeElement.textContent || "", 80) : "未识别";
     return {
       category_full: categoryFull,
-      category_short: categoryFull ? categoryFull.split(/\s*\/\s*/).filter(Boolean).at(-1) || null : null,
+      category_short: categoryShort,
+      category: categoryFull,
       created_at: new Date().toISOString(),
-      page_name: compactText(pageHeading?.innerText || pageHeading?.textContent || document.title || "", 500) || null,
+      page_title: compactText(pageHeading?.innerText || pageHeading?.textContent || document.title || "", 500) || "未识别",
+      rank_type: rankType,
       url: location.href
     };
   };
@@ -721,23 +731,14 @@ function collectionProjectData(result) {
     metadata: {
       category_full: metadata.category_full || null,
       category_short: metadata.category_short || null,
+      category: metadata.category || metadata.category_full || "未识别",
       created_at: metadata.created_at || new Date().toISOString(),
-      page_name: metadata.page_name || null,
+      page_title: metadata.page_title || null,
+      rank_type: metadata.rank_type || "未识别",
       url: metadata.url || location.href
     },
     products
   };
-}
-
-function collectionCsv(products, fields = projectProductFields) {
-  const escapeCell = (value) => {
-    const text = String(value ?? "");
-    return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-  };
-  return [
-    fields.map((field) => escapeCell(field.key)).join(","),
-    ...products.map((product) => fields.map((field) => escapeCell(product[field.key])).join(","))
-  ].join("\r\n");
 }
 
 function collectionXlsx(products, fields = projectProductFields) {
@@ -852,8 +853,7 @@ async function writeProjectFile(directory, filename, content) {
 }
 
 function projectFolderName(metadata) {
-  const shortName = String(metadata.category_short || "").replace(/[\\/:*?"<>|]/g, "_").replace(/\s+/g, " ").trim();
-  if (!shortName) throw new Error("请先在页面分析模式采样顶部类目标签，再采集当前页。");
+  const shortName = String(metadata.category_short || "未识别").replace(/[\\/:*?"<>|]/g, "_").replace(/\s+/g, " ").trim() || "未识别";
   const createdAt = new Date(metadata.created_at);
   const date = Number.isNaN(createdAt.valueOf()) ? new Date() : createdAt;
   const localDate = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -871,7 +871,6 @@ async function exportCollectionProject() {
   await writeProjectFile(collectionDirectory, "metadata.json", JSON.stringify(project.metadata, null, 2));
   await writeProjectFile(collectionDirectory, "products.json", JSON.stringify(project.products, null, 2));
   await writeProjectFile(collectionDirectory, "products.xlsx", collectionXlsx(project.products));
-  await writeProjectFile(collectionDirectory, "products.csv", `\uFEFF${collectionCsv(project.products)}`);
   return { folder_name: collectionDirectory.name, product_count: project.products.length };
 }
 
@@ -1501,7 +1500,7 @@ function installPanel() {
     paginationStatus.textContent = pageText;
     if (!result) {
       collectionState.textContent = "尚未采集";
-      metadataStatus.textContent = "metadata：将使用页面分析模式已采样的顶部类目标签";
+      metadataStatus.textContent = "metadata：采集当前页时自动读取页面信息";
       renderFieldTemplate(fieldTemplate);
       collectionPreviewTable.textContent = fieldTemplate.length ? "字段模板已保留，点击“采集当前页”生成新结果。" : "点击“采集当前页”查看示例数据。";
       try {
@@ -1519,9 +1518,9 @@ function installPanel() {
     collectionState.textContent = manualState?.last_page
       ? `✓ 第${manualState.last_page}页完成 · 已采集${result.item_count}条${manualState.duplicate ? "（本页已采集，未重复计数）" : ""}`
       : `${sourceLabel} · 当前页商品/条目数量：${result.item_count}`;
-    metadataStatus.textContent = result.metadata?.category_full
-      ? `metadata 类目：${result.metadata.category_full}`
-      : "metadata：未采样顶部类目标签，导出项目时会提示补充采样";
+    metadataStatus.textContent = result.metadata?.category_full === "未识别"
+      ? "metadata 类目：未识别（仍可导出项目）"
+      : `metadata 类目：${result.metadata.category_full}`;
     renderFieldTemplate(result.field_template);
     collectionPreviewTable.replaceChildren();
     if (result.preview_records.length) {
@@ -1686,4 +1685,4 @@ function installPanel() {
   return { started: true, already_open: false };
 }
 
-window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, collectCurrentPage, clearCollectionData, collectionCsv, collectionXlsx, exportCollectionProject, saveCollectionTemplate, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
+window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, collectCurrentPage, clearCollectionData, collectionXlsx, exportCollectionProject, saveCollectionTemplate, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
