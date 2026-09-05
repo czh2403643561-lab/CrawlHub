@@ -372,7 +372,10 @@ function collectPageData() {
     return Number(match[1]) * multiplier;
   };
   const parseRank = (value) => {
-    const match = String(value || "").match(/\d+/);
+    const text = String(value || "").replace(/\u00a0/g, " ").trim();
+    // 排名数字可能与趋势变化写在同一单元格中，例如“2 ↑871”或“↑871 2”。
+    // 只接受不紧邻上下箭头的数字，避免把变化值当成排名。
+    const match = text.match(/(^|\s)(\d+)(?=\s*(?:[↑↓-]|$))/);
     return match ? Number(match[0]) : null;
   };
   const parseProductDetails = (value) => {
