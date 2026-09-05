@@ -1,0 +1,131 @@
+:root {
+  color-scheme: light;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  color: #172033;
+  background: #f6f8fc;
+}
+
+body {
+  width: 320px;
+  margin: 0;
+}
+
+.panel {
+  padding: 20px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 22px;
+}
+
+h2 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+
+.subtitle {
+  margin: 6px 0 18px;
+  color: #647087;
+  font-size: 13px;
+}
+
+.actions {
+  display: grid;
+  gap: 8px;
+}
+
+button {
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: #fff;
+  background: #315efb;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.secondary {
+  color: #315efb;
+  background: #e8edff;
+}
+
+.status {
+  min-height: 18px;
+  margin: 12px 0 0;
+  color: #647087;
+  font-size: 12px;
+}
+
+.status.error {
+  color: #b42318;
+}
+
+.status.success {
+  color: #16794c;
+}
+
+.result {
+  margin-top: 14px;
+  border-top: 1px solid #dfe5f0;
+  padding-top: 14px;
+}
+
+.page-title {
+  margin: 0 0 10px;
+  overflow: hidden;
+  color: #344054;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summary {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  margin: 0;
+}
+
+.summary div {
+  border-radius: 6px;
+  padding: 8px;
+  background: #fff;
+}
+
+dt {
+  color: #647087;
+  font-size: 11px;
+}
+
+dd {
+  margin: 2px 0 0;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.selected {
+  margin-top: 12px;
+  border-radius: 6px;
+  padding: 10px;
+  background: #fff;
+  font-size: 12px;
+}
+
+.selected p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #475467;
+}
+
+.selected + button {
+  margin-top: 14px;
+}

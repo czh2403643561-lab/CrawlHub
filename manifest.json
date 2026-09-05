@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "CrawlHub - AI 页面结构分析助手",
+  "version": "0.1.0",
+  "description": "在本地分析当前网页结构，生成可交给 AI 的页面取证报告。",
+  "permissions": ["activeTab", "scripting", "downloads"],
+  "action": {
+    "default_title": "分析当前页面",
+    "default_popup": "popup.html"
+  }
+}

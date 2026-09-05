@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CrawlHub 页面分析</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="panel">
+      <h1>CrawlHub</h1>
+      <p class="subtitle">AI 页面结构分析助手 · 本地处理</p>
+
+      <div class="actions">
+        <button id="analyzeButton" type="button">生成页面分析报告</button>
+        <button id="pickButton" class="secondary" type="button">选择页面元素</button>
+      </div>
+
+      <p id="status" class="status" role="status">准备就绪</p>
+
+      <section id="result" class="result" hidden>
+        <p id="pageTitle" class="page-title"></p>
+        <dl class="summary">
+          <div><dt>文本节点</dt><dd id="textCount">0</dd></div>
+          <div><dt>图片</dt><dd id="imageCount">0</dd></div>
+          <div><dt>列表</dt><dd id="listCount">0</dd></div>
+          <div><dt>表格</dt><dd id="tableCount">0</dd></div>
+          <div><dt>JSON 线索</dt><dd id="jsonCount">0</dd></div>
+        </dl>
+        <section id="selectedElement" class="selected" hidden>
+          <h2>已选择元素</h2>
+          <p id="selectedSummary"></p>
+        </section>
+        <button id="downloadButton" class="secondary" type="button" disabled>
+          重新下载 analysis.json
+        </button>
+      </section>
+    </main>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
