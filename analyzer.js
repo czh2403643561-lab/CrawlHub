@@ -303,6 +303,159 @@ function analyzePage() {
   };
 }
 
+function collectPageData() {
+  const compactText = (value, length = 500) => {
+    const text = String(value || "").replace(/\s+/g, " ").trim();
+    return text.length > length ? `${text.slice(0, length)}…` : text;
+  };
+  const isVisible = (element) => {
+    if (!(element instanceof Element)) return false;
+    const style = getComputedStyle(element);
+    return style.display !== "none" && style.visibility !== "hidden" && element.getClientRects().length > 0;
+  };
+  const selectorFor = (element) => {
+    const parts = [];
+    let current = element;
+    while (current && current.nodeType === Node.ELEMENT_NODE && parts.length < 6) {
+      let part = current.tagName.toLowerCase();
+      if (current.id) part += `#${current.id.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+      else if (current.classList.length) part += `.${Array.from(current.classList).slice(0, 2).join(".")}`;
+      parts.unshift(part);
+      current = current.parentElement;
+    }
+    return parts.join(" > ");
+  };
+  const normalizeHeader = (value) => String(value || "").toLowerCase().replace(/[\s_\-:/：()（）]/g, "");
+  const fieldDefinitions = [
+    { key: "product_name", label: "商品名称", aliases: ["商品名称", "商品", "产品名称", "产品", "product name", "product", "title", "名称"], kind: "text" },
+    { key: "image", label: "图片", aliases: ["图片", "商品图片", "image", "product image", "thumbnail", "cover"], kind: "image" },
+    { key: "gmv", label: "GMV", aliases: ["gmv", "成交额", "交易额", "gross merchandise value"], kind: "metric" },
+    { key: "click_count", label: "点击次数", aliases: ["点击次数", "点击量", "click count", "clicks"], kind: "metric" },
+    { key: "click_rate", label: "点击率", aliases: ["点击率", "ctr", "click through rate", "click-through rate"], kind: "percentage" },
+    { key: "shop", label: "店铺", aliases: ["店铺名称", "店铺", "shop name", "shop", "store", "seller"], kind: "text" },
+    { key: "similar_product_count", label: "同款商品数", aliases: ["同款商品数", "同款数", "similar product count", "similar products", "similar items"], kind: "metric" }
+  ];
+  const headerScore = (header, aliases) => {
+    const normalized = normalizeHeader(header);
+    return aliases.reduce((best, alias) => {
+      const candidate = normalizeHeader(alias);
+      if (!candidate) return best;
+      if (normalized === candidate) return Math.max(best, 100 + candidate.length);
+      if (normalized.includes(candidate) || candidate.includes(normalized)) return Math.max(best, candidate.length);
+      return best;
+    }, 0);
+  };
+  const imageSource = (cell) => {
+    const image = cell?.querySelector("img");
+    return image ? (image.currentSrc || image.src || null) : null;
+  };
+  const cellDetails = (row) => Array.from(row.children)
+    .filter((cell) => ["td", "th"].includes(cell.tagName.toLowerCase()))
+    .map((cell) => ({ text: compactText(cell.innerText || cell.textContent || ""), image: imageSource(cell) }));
+  const tableCandidates = Array.from(document.querySelectorAll("table"))
+    .filter(isVisible)
+    .map((table) => {
+      const rows = Array.from(table.querySelectorAll("tr"));
+      const headerRow = rows.find((row) => row.querySelector(":scope > th")) || rows[0];
+      const headers = headerRow ? cellDetails(headerRow).map((cell, index) => cell.text || `column_${index + 1}`) : [];
+      const dataRows = rows.filter((row) => row !== headerRow && row.querySelector(":scope > td"));
+      const mappedCount = fieldDefinitions.filter((field) => headers.some((header) => headerScore(header, field.aliases) > 0)).length;
+      return { table, headers, dataRows, mappedCount, score: dataRows.length * 10 + mappedCount * 20 };
+    })
+    .filter((candidate) => candidate.headers.length && candidate.dataRows.length)
+    .sort((left, right) => right.score - left.score);
+
+  const pageAnalysis = analyzePage();
+  const tableCandidate = tableCandidates[0];
+  if (tableCandidate) {
+    const { table, headers, dataRows } = tableCandidate;
+    const columns = headers.map((header, index) => ({ index, header }));
+    const imageColumn = columns
+      .map((column) => ({ ...column, image_count: dataRows.slice(0, 8).filter((row) => Boolean(imageSource(row.children[column.index]))).length }))
+      .sort((left, right) => right.image_count - left.image_count)[0];
+    const fieldTemplate = fieldDefinitions.map((field) => {
+      let best = columns
+        .map((column) => ({ ...column, score: headerScore(column.header, field.aliases) }))
+        .sort((left, right) => right.score - left.score)[0];
+      if (field.key === "image" && (!best || best.score === 0) && imageColumn?.image_count) {
+        best = { ...imageColumn, score: 1 };
+      }
+      return {
+        key: field.key,
+        label: field.label,
+        value_type: field.kind,
+        source_header: best?.score ? best.header : null,
+        column_index: best?.score ? best.index : null,
+        available: Boolean(best?.score),
+        match_confidence: best?.score >= 100 ? "high" : best?.score ? "low" : "unmatched"
+      };
+    });
+    const records = dataRows.map((row) => {
+      const cells = cellDetails(row);
+      return Object.fromEntries(fieldTemplate
+        .filter((field) => field.available)
+        .map((field) => [field.label, field.key === "image" ? (cells[field.column_index]?.image || null) : (cells[field.column_index]?.text || "")]));
+    });
+    return {
+      schema_version: "1.0",
+      generated_at: new Date().toISOString(),
+      local_processing: true,
+      source_type: "table",
+      analysis_basis: { detected_tables: pageAnalysis.structures.tables.length, detected_lists: pageAnalysis.structures.lists.length },
+      source_selector: selectorFor(table),
+      item_count: records.length,
+      raw_columns: headers,
+      field_template: fieldTemplate,
+      records,
+      preview_records: records.slice(0, 5)
+    };
+  }
+
+  const listCandidate = Array.from(document.querySelectorAll("ul, ol, [role='list']"))
+    .filter(isVisible)
+    .map((list) => {
+      const items = Array.from(list.children).filter((item) => item.matches("li, [role='listitem']"));
+      return { list, items };
+    })
+    .filter((candidate) => candidate.items.length >= 2)
+    .sort((left, right) => right.items.length - left.items.length)[0];
+  if (listCandidate) {
+    const records = listCandidate.items.map((item) => ({
+      "条目文本": compactText(item.innerText || item.textContent || ""),
+      "图片": imageSource(item)
+    }));
+    return {
+      schema_version: "1.0",
+      generated_at: new Date().toISOString(),
+      local_processing: true,
+      source_type: "list",
+      analysis_basis: { detected_tables: pageAnalysis.structures.tables.length, detected_lists: pageAnalysis.structures.lists.length },
+      source_selector: selectorFor(listCandidate.list),
+      item_count: records.length,
+      raw_columns: ["条目文本", "图片"],
+      field_template: [
+        { key: "item_text", label: "条目文本", value_type: "text", source_header: "列表项文本", column_index: null, available: true, match_confidence: "high" },
+        { key: "image", label: "图片", value_type: "image", source_header: "列表项图片", column_index: null, available: records.some((record) => Boolean(record["图片"])), match_confidence: "high" }
+      ],
+      records,
+      preview_records: records.slice(0, 5)
+    };
+  }
+
+  return {
+    schema_version: "1.0",
+    generated_at: new Date().toISOString(),
+    local_processing: true,
+    source_type: null,
+    analysis_basis: { detected_tables: pageAnalysis.structures.tables.length, detected_lists: pageAnalysis.structures.lists.length },
+    item_count: 0,
+    raw_columns: [],
+    field_template: fieldDefinitions.map((field) => ({ key: field.key, label: field.label, value_type: field.kind, source_header: null, column_index: null, available: false, match_confidence: "unmatched" })),
+    records: [],
+    preview_records: []
+  };
+}
+
 function startElementPicker() {
   if (window.__crawlHubPickerCleanup) window.__crawlHubPickerCleanup();
 
@@ -803,7 +956,11 @@ function installPanel() {
       .collection-card { border-radius: 7px; padding: 11px; background: #fff; color: #475467; }
       .collection-card strong { color: #172033; }
       .collection-card p { margin: 7px 0 0; }
-      .collection-card ul { margin: 8px 0 0; padding-left: 18px; }
+      .collection-meta { margin: 9px 0; color: #344054; }
+      .collection-fields { max-height: 120px; margin: 0; padding: 0; overflow: auto; list-style: none; }
+      .collection-fields li { margin-top: 5px; border-radius: 5px; padding: 6px 7px; background: #f6f8fc; overflow-wrap: anywhere; font-size: 12px; }
+      .collection-fields li:first-child { margin-top: 0; }
+      .collection-preview { max-height: 180px; margin: 9px 0 0; padding: 8px; overflow: auto; border-radius: 6px; background: #f6f8fc; color: #344054; font: 11px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
       .view[hidden], .content[hidden] { display: none; }
     </style>
     <div class="panel">
@@ -827,15 +984,16 @@ function installPanel() {
         </div>
         <div id="collectionView" class="view" hidden>
           <div class="collection-card">
-            <strong>数据采集模式（基础框架）</strong>
-            <p>后续可根据页面分析结果生成采集规则，用于列表数据提取和导出。</p>
-            <ul>
-              <li>当前仅提供模式入口</li>
-              <li>暂不执行自动采集</li>
-              <li>暂不生成平台专用规则</li>
-            </ul>
+            <strong>当前页数据提取验证</strong>
+            <p>根据表头和行列关系生成字段模板，提取当前已加载的表格或列表数据。</p>
+            <div id="collectionState" class="collection-meta">尚未提取</div>
+            <ul id="collectionFields" class="collection-fields"><li>字段模板：未生成</li></ul>
+            <pre id="collectionPreview" class="collection-preview">点击“提取当前页列表”查看示例数据。</pre>
           </div>
-          <div class="actions" style="margin-top: 10px;"><button id="backToAnalysis" class="secondary">返回页面分析</button></div>
+          <div class="actions" style="margin-top: 10px;">
+            <button id="extractCollection">提取当前页列表</button>
+            <button id="backToAnalysis" class="secondary">返回页面分析</button>
+          </div>
         </div>
         <div id="message" class="message"></div>
       </div>
@@ -848,6 +1006,10 @@ function installPanel() {
   const collectionView = shadow.querySelector("#collectionView");
   const analysisModeButton = shadow.querySelector("#analysisMode");
   const collectionModeButton = shadow.querySelector("#collectionMode");
+  const collectionState = shadow.querySelector("#collectionState");
+  const collectionFields = shadow.querySelector("#collectionFields");
+  const collectionPreview = shadow.querySelector("#collectionPreview");
+  const extractCollectionButton = shadow.querySelector("#extractCollection");
   const stateText = shadow.querySelector("#state");
   const countText = shadow.querySelector("#count");
   const fieldSummary = shadow.querySelector("#fieldSummary");
@@ -861,6 +1023,21 @@ function installPanel() {
     message.textContent = text;
     message.className = `message ${kind}`.trim();
   };
+  const renderCollection = () => {
+    const result = window.__crawlHubCollectionPreview;
+    if (!result) return;
+    const sourceLabel = result.source_type === "table" ? "表格" : result.source_type === "list" ? "列表" : "未找到可提取的表格或列表";
+    collectionState.textContent = `${sourceLabel} · 当前页商品/条目数量：${result.item_count}`;
+    collectionFields.replaceChildren();
+    result.field_template.forEach((field) => {
+      const row = document.createElement("li");
+      row.textContent = `${field.label}：${field.available ? `来自“${field.source_header}”` : "未匹配"}`;
+      collectionFields.appendChild(row);
+    });
+    collectionPreview.textContent = result.preview_records.length
+      ? JSON.stringify(result.preview_records, null, 2)
+      : "当前页面未识别到可提取的表格或列表数据。";
+  };
   const setMode = (mode) => {
     window.__crawlHubMode = mode;
     const isAnalysis = mode === "analysis";
@@ -870,6 +1047,7 @@ function installPanel() {
     collectionModeButton.classList.toggle("active", !isAnalysis);
     if (!isAnalysis && window.__crawlHubSamplingActive) stopElementSampling();
     render();
+    renderCollection();
   };
   const render = () => {
     const selected = Array.isArray(window.__crawlHubSelectedElements) ? window.__crawlHubSelectedElements : [];
@@ -902,9 +1080,19 @@ function installPanel() {
   analysisModeButton.addEventListener("click", () => setMode("analysis"));
   collectionModeButton.addEventListener("click", () => {
     setMode("collection");
-    setMessage("数据采集模式已打开：当前仅保留基础框架，未执行采集。", "success");
+    setMessage("可提取当前页已加载的数据；不会翻页或发送页面数据。", "success");
   });
   shadow.querySelector("#backToAnalysis").addEventListener("click", () => setMode("analysis"));
+  extractCollectionButton.addEventListener("click", () => {
+    try {
+      const result = collectPageData();
+      window.__crawlHubCollectionPreview = result;
+      renderCollection();
+      setMessage(result.item_count ? `已提取当前页 ${result.item_count} 条数据。` : "未找到可提取的表格或列表数据。", result.item_count ? "success" : "error");
+    } catch (error) {
+      setMessage(`提取失败：${error.message || "无法读取当前页面"}`, "error");
+    }
+  });
   sampleButton.addEventListener("click", () => {
     if (window.__crawlHubSamplingActive) {
       stopElementSampling();
@@ -941,4 +1129,4 @@ function installPanel() {
   return { started: true, already_open: false };
 }
 
-window.__crawlHub = { analyzePage, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
+window.__crawlHub = { analyzePage, collectPageData, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
