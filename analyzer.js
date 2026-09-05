@@ -1392,7 +1392,7 @@ function stopElementSampling() {
 }
 
 function installPanel() {
-  const panelVersion = "intelligence-center-v1";
+  const panelVersion = "intelligence-center-v2";
   if (window.__crawlHubPanelHost) {
     if (window.__crawlHubPanelHost.dataset.crawlHubPanelVersion !== panelVersion) {
       stopElementSampling();
@@ -1462,33 +1462,53 @@ function installPanel() {
       .collection-actions button { padding: 6px 8px; }
       .export-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
       .export-options[hidden] { display: none; }
-      .intelligence-card { overflow: hidden; border: 1px solid #e4e7ec; border-radius: 9px; background: #fff; }
-      .intelligence-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 14px 16px; border-bottom: 1px solid #eaecf0; }
-      .intelligence-header h2 { margin: 0; color: #172033; font-size: 16px; }
+      .intelligence-workbench { display: grid; grid-template-columns: 184px minmax(0, 1fr); gap: 14px; min-height: 620px; padding: 2px; background: #f4f6fa; }
+      .intelligence-nav { padding: 16px 10px; border-radius: 9px; background: #fff; }
+      .intelligence-nav-label { margin: 0 8px 12px; color: #98a2b3; font-size: 12px; }
+      .intelligence-nav-item { display: block; width: 100%; border: 0; border-radius: 6px; padding: 9px 10px; color: #475467; background: transparent; text-align: left; font: inherit; cursor: default; }
+      .intelligence-nav-item.active { color: #008f8a; background: #e8f7f5; font-weight: 700; }
+      .intelligence-main { min-width: 0; overflow: hidden; border-radius: 9px; background: #fff; }
+      .intelligence-top { padding: 18px 20px 0; border-bottom: 1px solid #eaecf0; }
+      .intelligence-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+      .intelligence-header h2 { margin: 0; color: #172033; font-size: 20px; line-height: 1.35; }
       .intelligence-header p { margin: 4px 0 0; color: #667085; font-size: 12px; }
-      .intelligence-header button { flex: 0 0 auto; border: 1px solid #cdd7ff; border-radius: 6px; padding: 6px 9px; color: #315efb; background: #f5f7ff; cursor: pointer; font: inherit; font-size: 12px; }
-      .intelligence-summary { display: flex; gap: 8px; padding: 10px 16px; color: #475467; background: #f8faff; font-size: 12px; }
-      .intelligence-summary span { max-width: 46%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .intelligence-table-wrap { max-height: min(62vh, 620px); overflow: auto; }
-      .intelligence-table { min-width: 1370px; width: 100%; border-collapse: separate; border-spacing: 0; color: #344054; font-size: 12px; }
-      .intelligence-table th, .intelligence-table td { padding: 10px 12px; border-bottom: 1px solid #eaecf0; background: #fff; text-align: left; vertical-align: middle; }
-      .intelligence-table th { position: sticky; top: 0; z-index: 4; color: #475467; background: #f8fafc; font-size: 12px; font-weight: 600; white-space: nowrap; }
-      .intelligence-table tbody tr:hover td { background: #f8faff; }
-      .intelligence-table .sticky-rank { position: sticky; left: 0; z-index: 3; min-width: 58px; width: 58px; text-align: center; }
-      .intelligence-table .sticky-change { position: sticky; left: 58px; z-index: 3; min-width: 76px; width: 76px; text-align: center; }
-      .intelligence-table .sticky-product { position: sticky; left: 134px; z-index: 3; min-width: 330px; width: 330px; box-shadow: 8px 0 14px -14px rgba(16,24,40,.55); }
-      .intelligence-table th.sticky-rank, .intelligence-table th.sticky-change, .intelligence-table th.sticky-product { z-index: 5; background: #f8fafc; }
-      .intelligence-product { display: flex; align-items: center; gap: 10px; min-width: 0; }
-      .intelligence-product img, .intelligence-image-placeholder { flex: 0 0 auto; width: 42px; height: 42px; border: 1px solid #e4e7ec; border-radius: 6px; background: #f2f4f7; object-fit: cover; }
-      .intelligence-product-name { overflow: hidden; color: #172033; font-weight: 600; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+      .intelligence-header-actions { display: flex; align-items: center; gap: 9px; color: #667085; font-size: 12px; white-space: nowrap; }
+      .intelligence-header button { flex: 0 0 auto; border: 1px solid #bcd9ff; border-radius: 6px; padding: 7px 10px; color: #315efb; background: #f5f8ff; cursor: pointer; font: inherit; font-size: 12px; }
+      .intelligence-tabs { display: flex; gap: 22px; margin-top: 18px; }
+      .intelligence-tabs span { padding: 0 0 10px; color: #667085; font-size: 13px; }
+      .intelligence-tabs span.active { border-bottom: 2px solid #00a39b; color: #172033; font-weight: 700; }
+      .intelligence-filter { display: flex; align-items: center; gap: 8px; padding: 13px 0; border-top: 1px solid #f2f4f7; }
+      .intelligence-category { max-width: 360px; overflow: hidden; border: 1px solid #d0d5dd; border-radius: 5px; padding: 7px 10px; color: #344054; background: #fff; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+      .intelligence-filter input { width: 220px; border: 1px solid #d0d5dd; border-radius: 5px; padding: 7px 10px; color: #98a2b3; background: #fff; font: inherit; font-size: 12px; }
+      .intelligence-filter input:disabled { opacity: 1; cursor: default; }
+      .intelligence-note { margin: 0 20px 14px; border-radius: 7px; padding: 10px 12px; color: #475467; background: #eef1f5; font-size: 12px; }
+      .intelligence-note strong { color: #344054; }
+      .intelligence-summary { display: flex; gap: 14px; padding: 0 20px 12px; color: #667085; font-size: 12px; }
+      .intelligence-summary span { max-width: 48%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .intelligence-table-wrap { max-height: min(60vh, 650px); margin: 0 20px; overflow: auto; border: 1px solid #eaecf0; border-radius: 8px; overscroll-behavior: contain; }
+      .intelligence-table { min-width: 1560px; width: 100%; border-collapse: separate; border-spacing: 0; color: #344054; font-size: 12px; }
+      .intelligence-table th, .intelligence-table td { padding: 13px 12px; border-bottom: 1px solid #eaecf0; background: #fff; text-align: left; vertical-align: middle; }
+      .intelligence-table th { position: sticky; top: 0; z-index: 4; color: #667085; background: #f7f8fa; font-size: 12px; font-weight: 600; white-space: nowrap; }
+      .intelligence-table tbody tr:hover td { background: #f8fcfc; }
+      .intelligence-table .sticky-rank { position: sticky; left: 0; z-index: 3; min-width: 54px; width: 54px; text-align: center; }
+      .intelligence-table .sticky-change { position: sticky; left: 54px; z-index: 3; min-width: 66px; width: 66px; text-align: center; }
+      .intelligence-table .sticky-product { position: sticky; left: 120px; z-index: 3; min-width: 340px; width: 340px; }
+      .intelligence-table .sticky-price { position: sticky; left: 460px; z-index: 3; min-width: 145px; width: 145px; color: #475467; white-space: nowrap; }
+      .intelligence-table .sticky-rating { position: sticky; left: 605px; z-index: 3; min-width: 135px; width: 135px; box-shadow: 10px 0 14px -14px rgba(16,24,40,.7); white-space: nowrap; }
+      .intelligence-table th.sticky-rank, .intelligence-table th.sticky-change, .intelligence-table th.sticky-product, .intelligence-table th.sticky-price, .intelligence-table th.sticky-rating { z-index: 5; background: #f7f8fa; }
+      .intelligence-table tbody tr:hover .sticky-rank, .intelligence-table tbody tr:hover .sticky-change, .intelligence-table tbody tr:hover .sticky-product, .intelligence-table tbody tr:hover .sticky-price, .intelligence-table tbody tr:hover .sticky-rating { background: #f8fcfc; }
+      .intelligence-product { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+      .intelligence-product img, .intelligence-image-placeholder { flex: 0 0 auto; width: 44px; height: 44px; border: 1px solid #e4e7ec; border-radius: 6px; background: #f2f4f7; object-fit: cover; }
+      .intelligence-product-name { display: -webkit-box; overflow: hidden; color: #172033; font-weight: 600; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
       .trend-up { color: #039855; font-weight: 600; }
       .trend-down { color: #d92d20; font-weight: 600; }
       .trend-flat { color: #98a2b3; }
-      .intelligence-metric { min-width: 132px; white-space: nowrap; }
-      .intelligence-actions { display: flex; gap: 5px; min-width: 220px; }
-      .intelligence-actions button { border: 1px solid #d0d5dd; border-radius: 5px; padding: 5px 7px; color: #475467; background: #fff; cursor: default; font: inherit; font-size: 11px; white-space: nowrap; }
-      .intelligence-actions button:first-child { border-color: #b9c6ff; color: #315efb; background: #f5f7ff; }
-      .intelligence-empty { padding: 32px 16px; color: #667085; text-align: center; }
+      .intelligence-metric { min-width: 142px; white-space: nowrap; }
+      .intelligence-actions { display: grid; gap: 5px; min-width: 112px; }
+      .intelligence-actions button { border: 0; border-radius: 4px; padding: 5px 8px; color: #475467; background: #f2f4f7; cursor: default; font: inherit; font-size: 11px; white-space: nowrap; }
+      .intelligence-actions button:first-child { color: #fff; background: #00a39b; }
+      .intelligence-footer { display: flex; justify-content: flex-end; padding: 11px 20px 15px; color: #667085; font-size: 12px; }
+      .intelligence-empty { padding: 48px 16px; color: #667085; text-align: center; }
       .view[hidden], .content[hidden] { display: none; }
     </style>
     <div class="panel">
@@ -1530,13 +1550,29 @@ function installPanel() {
           </div>
         </div>
         <div id="intelligenceView" class="view" hidden>
-          <div class="intelligence-card">
-            <div class="intelligence-header">
-              <div><h2>商品情报中心</h2><p id="intelligenceSubtitle">读取已保存的项目数据，集中浏览商品表现。</p></div>
-              <button id="refreshIntelligence" type="button">刷新项目数据</button>
+          <div class="intelligence-workbench">
+            <aside class="intelligence-nav" aria-label="商品情报导航">
+              <p class="intelligence-nav-label">商品</p>
+              <button class="intelligence-nav-item" type="button">详细信息</button>
+              <button class="intelligence-nav-item" type="button">热卖商品</button>
+              <button class="intelligence-nav-item" type="button">商品流量</button>
+              <p class="intelligence-nav-label" style="margin-top: 20px;">商品榜单</p>
+              <button class="intelligence-nav-item active" type="button">TikTok 热卖商品榜</button>
+            </aside>
+            <section class="intelligence-main">
+              <div class="intelligence-top">
+                <div class="intelligence-header">
+                  <div><h2 id="intelligenceTitle">商品情报中心</h2><p id="intelligenceSubtitle">读取已保存的项目数据，集中浏览商品表现。</p></div>
+                  <div class="intelligence-header-actions"><span id="intelligenceTime">本地采集数据</span><button id="refreshIntelligence" type="button">刷新项目数据</button></div>
+                </div>
+                <div class="intelligence-tabs"><span class="active">总榜</span><span>直播榜</span><span>短视频榜</span><span>商品卡</span></div>
+                <div class="intelligence-filter"><span id="intelligenceCategory" class="intelligence-category">类目：未识别</span><input disabled value="同款商品少于　请填写数字" aria-label="同款商品筛选（暂未开放）" /></div>
+              </div>
+              <div class="intelligence-note"><strong>●</strong> 本页展示 CrawlHub 已保存的商品数据，横向滚动可浏览更多指标。</div>
+              <div id="intelligenceSummary" class="intelligence-summary"></div>
+              <div id="intelligenceTable" class="intelligence-table-wrap"></div>
+              <div id="intelligenceFooter" class="intelligence-footer"></div>
             </div>
-            <div id="intelligenceSummary" class="intelligence-summary"></div>
-            <div id="intelligenceTable" class="intelligence-table-wrap"></div>
           </div>
         </div>
         <div id="message" class="message"></div>
@@ -1552,9 +1588,13 @@ function installPanel() {
   const analysisModeButton = shadow.querySelector("#analysisMode");
   const collectionModeButton = shadow.querySelector("#collectionMode");
   const intelligenceModeButton = shadow.querySelector("#intelligenceMode");
+  const intelligenceTitle = shadow.querySelector("#intelligenceTitle");
   const intelligenceSubtitle = shadow.querySelector("#intelligenceSubtitle");
   const intelligenceSummary = shadow.querySelector("#intelligenceSummary");
   const intelligenceTable = shadow.querySelector("#intelligenceTable");
+  const intelligenceTime = shadow.querySelector("#intelligenceTime");
+  const intelligenceCategory = shadow.querySelector("#intelligenceCategory");
+  const intelligenceFooter = shadow.querySelector("#intelligenceFooter");
   const refreshIntelligenceButton = shadow.querySelector("#refreshIntelligence");
   const collectionState = shadow.querySelector("#collectionState");
   const metadataStatus = shadow.querySelector("#metadataStatus");
@@ -1666,7 +1706,11 @@ function installPanel() {
   };
   const renderIntelligence = async () => {
     intelligenceSubtitle.textContent = "正在读取已保存的项目数据…";
+    intelligenceTitle.textContent = "商品情报中心";
+    intelligenceTime.textContent = "本地采集数据";
+    intelligenceCategory.textContent = "类目：未识别";
     intelligenceSummary.replaceChildren();
+    intelligenceFooter.textContent = "";
     intelligenceTable.innerHTML = '<div class="intelligence-empty">正在加载商品项目…</div>';
     const project = await readIntelligenceProject();
     if (window.__crawlHubMode !== "intelligence") return;
@@ -1678,11 +1722,16 @@ function installPanel() {
     const metadata = project.metadata || {};
     const products = project.products;
     const category = metadata.category_full || metadata.category_short || "未识别类目";
-    intelligenceSubtitle.textContent = `${metadata.page_title || "已保存项目"} · ${products.length} 条商品`;
+    const createdAt = metadata.created_at ? new Date(metadata.created_at) : null;
+    const createdText = createdAt && !Number.isNaN(createdAt.valueOf()) ? createdAt.toLocaleString() : "未识别";
+    intelligenceTitle.textContent = metadata.page_title || "TikTok 热卖商品榜";
+    intelligenceSubtitle.textContent = `已保存商品研究项目 · ${products.length} 条商品`;
+    intelligenceTime.textContent = `采集时间：${createdText}`;
+    intelligenceCategory.textContent = `类目：${category}`;
     [
-      `类目：${category}`,
       `项目：${project.project_id || "当前项目"}`,
-      `采集时间：${metadata.created_at ? new Date(metadata.created_at).toLocaleString() : "未识别"}`
+      `数据来源：CrawlHub 本地项目`,
+      `当前商品：${products.length} 条`
     ].forEach((text) => {
       const item = document.createElement("span");
       item.textContent = text;
@@ -1693,7 +1742,7 @@ function installPanel() {
     table.className = "intelligence-table";
     const headers = [
       ["排名", "sticky-rank"], ["排名变化", "sticky-change"], ["商品", "sticky-product"],
-      ["价格范围", "intelligence-metric"], ["商品评分", "intelligence-metric"], ["GMV", "intelligence-metric"],
+      ["价格范围", "sticky-price"], ["商品评分", "sticky-rating"], ["GMV", "intelligence-metric"],
       ["点击次数", "intelligence-metric"], ["点击率", "intelligence-metric"], ["店铺", "intelligence-metric"],
       ["同款商品数", "intelligence-metric"], ["商品操作", "intelligence-metric"]
     ];
@@ -1743,9 +1792,17 @@ function installPanel() {
       name.textContent = display(product.product_name);
       productInfo.appendChild(name);
       productCell.appendChild(productInfo);
-      [product.price, product.rating, product.gmv, product.clicks, product.ctr, product.shop, product.similar_products].forEach((value) => {
+      [
+        [product.price, "sticky-price"],
+        [product.rating, "sticky-rating"],
+        [product.gmv, "intelligence-metric"],
+        [product.clicks, "intelligence-metric"],
+        [product.ctr, "intelligence-metric"],
+        [product.shop, "intelligence-metric"],
+        [product.similar_products, "intelligence-metric"]
+      ].forEach(([value, className]) => {
         const cell = row.insertCell();
-        cell.className = "intelligence-metric";
+        cell.className = className;
         cell.textContent = display(value);
       });
       const actions = row.insertCell();
@@ -1762,6 +1819,7 @@ function installPanel() {
       actions.appendChild(actionGroup);
     });
     intelligenceTable.appendChild(table);
+    intelligenceFooter.textContent = `共 ${products.length} 条商品 · 可上下浏览，横向滚动查看店铺、同款商品数等指标`;
   };
   const setMode = (mode) => {
     window.__crawlHubMode = mode;
