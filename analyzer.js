@@ -257,6 +257,7 @@ function analyzePage() {
 
   return {
     schema_version: "1.0",
+    mode: window.__crawlHubMode || "analysis",
     analysis_scope: "通用页面结构分析，不包含平台专用解析规则",
     generated_at: new Date().toISOString(),
     page: {
@@ -796,19 +797,45 @@ function installPanel() {
       .message { min-height: 18px; margin-top: 9px; color: #667085; font-size: 12px; }
       .message.success { color: #16794c; }
       .message.error { color: #b42318; }
+      .mode-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 10px; padding: 3px; border-radius: 7px; background: #e5eaf3; }
+      .mode-switch button { border: 0; border-radius: 5px; padding: 7px 8px; color: #667085; background: transparent; cursor: pointer; font: inherit; font-weight: 600; }
+      .mode-switch button.active { color: #315efb; background: #fff; box-shadow: 0 1px 3px rgba(16,24,40,.12); }
+      .collection-card { border-radius: 7px; padding: 11px; background: #fff; color: #475467; }
+      .collection-card strong { color: #172033; }
+      .collection-card p { margin: 7px 0 0; }
+      .collection-card ul { margin: 8px 0 0; padding-left: 18px; }
+      .view[hidden], .content[hidden] { display: none; }
     </style>
     <div class="panel">
       <header><strong>CrawlHub 页面分析</strong><button id="minimize" title="最小化">−</button><button id="close" title="关闭">×</button></header>
       <div id="content" class="content">
         <div class="hint">数据仅在本地处理，不记录响应内容。</div>
-        <div class="state">当前状态：<span id="state">待机</span></div>
-        <div class="count">已选择元素：<strong id="count">0</strong></div>
-        <div id="fieldSummary" class="field-summary">已选择字段摘要：暂无</div>
-        <ul id="samples" class="samples"></ul>
-        <div class="actions">
-          <button id="sample">开始元素采样</button>
-          <button id="observe" class="secondary">监听后续网络请求</button>
-          <button id="analyze" class="secondary">分析并下载 analysis.json</button>
+        <div class="mode-switch" role="tablist" aria-label="工作模式">
+          <button id="analysisMode" class="active" type="button">页面分析</button>
+          <button id="collectionMode" type="button">数据采集</button>
+        </div>
+        <div id="analysisView" class="view">
+          <div class="state">当前状态：<span id="state">待机</span></div>
+          <div class="count">已选择元素：<strong id="count">0</strong></div>
+          <div id="fieldSummary" class="field-summary">已选择字段摘要：暂无</div>
+          <ul id="samples" class="samples"></ul>
+          <div class="actions">
+            <button id="sample">开始元素采样</button>
+            <button id="observe" class="secondary">监听后续网络请求</button>
+            <button id="analyze" class="secondary">分析并下载 analysis.json</button>
+          </div>
+        </div>
+        <div id="collectionView" class="view" hidden>
+          <div class="collection-card">
+            <strong>数据采集模式（基础框架）</strong>
+            <p>后续可根据页面分析结果生成采集规则，用于列表数据提取和导出。</p>
+            <ul>
+              <li>当前仅提供模式入口</li>
+              <li>暂不执行自动采集</li>
+              <li>暂不生成平台专用规则</li>
+            </ul>
+          </div>
+          <div class="actions" style="margin-top: 10px;"><button id="backToAnalysis" class="secondary">返回页面分析</button></div>
         </div>
         <div id="message" class="message"></div>
       </div>
@@ -817,6 +844,10 @@ function installPanel() {
   window.__crawlHubPanelHost = host;
 
   const content = shadow.querySelector("#content");
+  const analysisView = shadow.querySelector("#analysisView");
+  const collectionView = shadow.querySelector("#collectionView");
+  const analysisModeButton = shadow.querySelector("#analysisMode");
+  const collectionModeButton = shadow.querySelector("#collectionMode");
   const stateText = shadow.querySelector("#state");
   const countText = shadow.querySelector("#count");
   const fieldSummary = shadow.querySelector("#fieldSummary");
@@ -829,6 +860,16 @@ function installPanel() {
   const setMessage = (text, kind = "") => {
     message.textContent = text;
     message.className = `message ${kind}`.trim();
+  };
+  const setMode = (mode) => {
+    window.__crawlHubMode = mode;
+    const isAnalysis = mode === "analysis";
+    analysisView.hidden = !isAnalysis;
+    collectionView.hidden = isAnalysis;
+    analysisModeButton.classList.toggle("active", isAnalysis);
+    collectionModeButton.classList.toggle("active", !isAnalysis);
+    if (!isAnalysis && window.__crawlHubSamplingActive) stopElementSampling();
+    render();
   };
   const render = () => {
     const selected = Array.isArray(window.__crawlHubSelectedElements) ? window.__crawlHubSelectedElements : [];
@@ -858,6 +899,12 @@ function installPanel() {
   };
 
   window.__crawlHubSamplingChanged = render;
+  analysisModeButton.addEventListener("click", () => setMode("analysis"));
+  collectionModeButton.addEventListener("click", () => {
+    setMode("collection");
+    setMessage("数据采集模式已打开：当前仅保留基础框架，未执行采集。", "success");
+  });
+  shadow.querySelector("#backToAnalysis").addEventListener("click", () => setMode("analysis"));
   sampleButton.addEventListener("click", () => {
     if (window.__crawlHubSamplingActive) {
       stopElementSampling();
@@ -890,7 +937,7 @@ function installPanel() {
     delete window.__crawlHubPanelHost;
     delete window.__crawlHubSamplingChanged;
   });
-  render();
+  setMode(window.__crawlHubMode || "analysis");
   return { started: true, already_open: false };
 }
 
