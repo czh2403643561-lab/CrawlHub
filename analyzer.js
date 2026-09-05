@@ -328,6 +328,7 @@ function collectPageData() {
   const normalizeHeader = (value) => String(value || "").toLowerCase().replace(/[\s_\-:/：()（）]/g, "");
   const fieldDefinitions = [
     { key: "rank", label: "排名", aliases: ["排名", "rank", "ranking", "position", "序号"], kind: "number" },
+    { key: "rank_change", label: "排名变化", aliases: ["排名变化", "排名变动", "排名趋势", "rank change", "rank trend"], kind: "number" },
     { key: "product_name", label: "商品名称", aliases: ["商品名称", "商品", "产品名称", "产品", "product name", "product", "title", "名称"], kind: "text" },
     { key: "image", label: "图片", aliases: ["图片", "商品图片", "image", "product image", "thumbnail", "cover"], kind: "image" },
     { key: "price_range", label: "价格范围", aliases: ["价格范围", "价格", "price range", "price"], kind: "text" },
@@ -371,12 +372,47 @@ function collectPageData() {
     const multiplier = match[2] === "万" ? 10000 : ["k", "K"].includes(match[2]) ? 1000 : 1;
     return Number(match[1]) * multiplier;
   };
-  const parseRank = (value) => {
-    const text = String(value || "").replace(/\u00a0/g, " ").trim();
-    // 排名数字可能与趋势变化写在同一单元格中，例如“2 ↑871”或“↑871 2”。
-    // 只接受不紧邻上下箭头的数字，避免把变化值当成排名。
-    const match = text.match(/(^|\s)(\d+)(?=\s*(?:[↑↓-]|$))/);
+  const parseRankNumber = (value) => {
+    const match = String(value || "").match(/\d+/);
     return match ? Number(match[0]) : null;
+  };
+  const parseRankChange = (value) => {
+    const text = String(value || "").replace(/\s+/g, " ").trim();
+    if (!text || /^[\-–—]$/.test(text)) return null;
+    const match = text.match(/\d+/);
+    return match ? Number(match[0]) : null;
+  };
+  const rankParts = (cell, rowIndex) => {
+    const containers = Array.from(cell?.querySelectorAll("*") || []);
+    const container = containers.find((element) => {
+      const children = Array.from(element.children).filter(isVisible);
+      if (children.length !== 2) return false;
+      const trendText = compactText(children[1].innerText || children[1].textContent || "", 100);
+      return /^(?:[↑↓]\s*)?(?:\d+\+?|[\-–—])$/.test(trendText);
+    });
+    if (container) {
+      const [rankElement, trendElement] = Array.from(container.children).filter(isVisible);
+      const rank = parseRankNumber(rankElement.innerText || rankElement.textContent || "") ?? rowIndex + 1;
+      return { rank, rank_change: parseRankChange(trendElement.innerText || trendElement.textContent || "") };
+    }
+    return { rank: parseRankNumber(cell?.innerText || cell?.textContent || ""), rank_change: null };
+  };
+  const pageMetadata = () => {
+    const selected = Array.isArray(window.__crawlHubSelectedElements) ? window.__crawlHubSelectedElements : [];
+    const categoryFull = selected
+      .map((item) => {
+        const element = item.selector ? document.querySelector(item.selector) : null;
+        return compactText(element?.innerText || element?.textContent || item.text || "", 500);
+      })
+      .find((text) => text.split(/\s*\/\s*/).filter(Boolean).length >= 2) || null;
+    const pageHeading = Array.from(document.querySelectorAll("h1")).find(isVisible);
+    return {
+      category_full: categoryFull,
+      category_short: categoryFull ? categoryFull.split(/\s*\/\s*/).filter(Boolean).at(-1) || null : null,
+      created_at: new Date().toISOString(),
+      page_name: compactText(pageHeading?.innerText || pageHeading?.textContent || document.title || "", 500) || null,
+      url: location.href
+    };
   };
   const parseProductDetails = (value) => {
     const text = String(value || "").replace(/\s+/g, " ").trim();
@@ -431,6 +467,12 @@ function collectPageData() {
       if (["price_range", "rating", "review_count"].includes(field.key) && (!best || best.score === 0) && productColumn?.score && hasEmbeddedProductDetails) {
         best = { ...productColumn, score: 1 };
       }
+      if (field.key === "rank_change" && (!best || best.score === 0)) {
+        const rankColumn = columns
+          .map((column) => ({ ...column, score: headerScore(column.header, fieldDefinitions.find((candidate) => candidate.key === "rank").aliases) }))
+          .sort((left, right) => right.score - left.score)[0];
+        if (rankColumn?.score) best = { ...rankColumn, score: 1 };
+      }
       return {
         key: field.key,
         label: field.label,
@@ -442,9 +484,11 @@ function collectPageData() {
         extraction: ["price_range", "rating", "review_count"].includes(field.key) && best?.index === productColumn?.index && best?.score < 100 ? "embedded_product_text" : "cell_value"
       };
     });
-    const records = dataRows.map((row) => {
+    const rankColumnIndex = fieldTemplate.find((field) => field.key === "rank" && field.available)?.column_index;
+    const records = dataRows.map((row, rowIndex) => {
       const cells = cellDetails(row);
       const productDetails = productColumn?.score ? parseProductDetails(cells[productColumn.index]?.text || "") : null;
+      const rowRankParts = rankColumnIndex !== undefined ? rankParts(row.children[rankColumnIndex], rowIndex) : { rank: null, rank_change: null };
       return Object.fromEntries(fieldTemplate
         .filter((field) => field.available)
         .map((field) => {
@@ -452,13 +496,15 @@ function collectPageData() {
           if (productDetails && field.key === "price_range" && field.column_index === productColumn.index && field.extraction === "embedded_product_text") return [field.label, productDetails.price_range];
           if (productDetails && field.key === "rating" && field.column_index === productColumn.index && field.extraction === "embedded_product_text") return [field.label, productDetails.rating];
           if (productDetails && field.key === "review_count" && field.column_index === productColumn.index && field.extraction === "embedded_product_text") return [field.label, productDetails.review_count];
-          if (field.key === "rank") return [field.label, parseRank(cells[field.column_index]?.text || "")];
+          if (field.key === "rank") return [field.label, rowRankParts.rank];
+          if (field.key === "rank_change") return [field.label, rowRankParts.rank_change];
           return [field.label, field.key === "image" ? (cells[field.column_index]?.image || null) : (cells[field.column_index]?.text || "")];
         }));
     });
     return {
       schema_version: "1.0",
       generated_at: new Date().toISOString(),
+      metadata: pageMetadata(),
       local_processing: true,
       source_type: "table",
       analysis_basis: { detected_tables: pageAnalysis.structures.tables.length, detected_lists: pageAnalysis.structures.lists.length },
@@ -487,6 +533,7 @@ function collectPageData() {
     return {
       schema_version: "1.0",
       generated_at: new Date().toISOString(),
+      metadata: pageMetadata(),
       local_processing: true,
       source_type: "list",
       analysis_basis: { detected_tables: pageAnalysis.structures.tables.length, detected_lists: pageAnalysis.structures.lists.length },
@@ -505,6 +552,7 @@ function collectPageData() {
   return {
     schema_version: "1.0",
     generated_at: new Date().toISOString(),
+    metadata: pageMetadata(),
     local_processing: true,
     source_type: null,
     analysis_basis: { detected_tables: pageAnalysis.structures.tables.length, detected_lists: pageAnalysis.structures.lists.length },
@@ -564,6 +612,7 @@ function collectionEnvironment(result, pagination) {
   return {
     page: `${location.origin || ""}${location.pathname || ""}`,
     title: document.title || "",
+    category_full: result.metadata?.category_full || null,
     source_type: result.source_type,
     columns: result.raw_columns.map((column) => ({ header: column.header, column_index: column.column_index })),
     fields: result.field_template.map((field) => ({ key: field.key, source_header: field.source_header, column_index: field.column_index, available: field.available })),
@@ -639,30 +688,59 @@ function collectCurrentPage() {
   return { result: merged, pagination, duplicate: alreadyCollected, cancelled: false };
 }
 
-function downloadCollectionFile(filename, content, mimeType) {
-  const blobUrl = URL.createObjectURL(new Blob([content], { type: mimeType }));
-  const anchor = document.createElement("a");
-  anchor.href = blobUrl;
-  anchor.download = filename;
-  anchor.click();
-  setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+const projectProductFields = [
+  { key: "rank", label: "排名" },
+  { key: "rank_change", label: "排名变化" },
+  { key: "product_name", label: "商品名称" },
+  { key: "image", label: "图片" },
+  { key: "price", label: "价格范围" },
+  { key: "rating", label: "商品评分" },
+  { key: "gmv", label: "GMV" },
+  { key: "clicks", label: "点击次数" },
+  { key: "ctr", label: "点击率" },
+  { key: "shop", label: "店铺" },
+  { key: "similar_products", label: "同款商品数" }
+];
+
+function collectionProjectData(result) {
+  const metadata = result.metadata || {};
+  const products = result.records.map((record) => ({
+    rank: record["排名"] ?? null,
+    rank_change: record["排名变化"] ?? null,
+    product_name: record["商品名称"] ?? null,
+    image: record["图片"] ?? null,
+    price: record["价格范围"] ?? null,
+    rating: record["商品评分"] ?? null,
+    gmv: record["GMV"] ?? null,
+    clicks: record["点击次数"] ?? null,
+    ctr: record["点击率"] ?? null,
+    shop: record["店铺"] ?? null,
+    similar_products: record["同款商品数"] ?? null
+  }));
+  return {
+    metadata: {
+      category_full: metadata.category_full || null,
+      category_short: metadata.category_short || null,
+      created_at: metadata.created_at || new Date().toISOString(),
+      page_name: metadata.page_name || null,
+      url: metadata.url || location.href
+    },
+    products
+  };
 }
 
-function collectionCsv(result) {
-  const fields = result.field_template.filter((field) => field.available && result.records.some((record) => Object.prototype.hasOwnProperty.call(record, field.label)));
+function collectionCsv(products, fields = projectProductFields) {
   const escapeCell = (value) => {
     const text = String(value ?? "");
     return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   };
   return [
-    fields.map((field) => escapeCell(field.label)).join(","),
-    ...result.records.map((record) => fields.map((field) => escapeCell(record[field.label])).join(","))
+    fields.map((field) => escapeCell(field.key)).join(","),
+    ...products.map((product) => fields.map((field) => escapeCell(product[field.key])).join(","))
   ].join("\r\n");
 }
 
-function collectionXlsx(result) {
-  const fields = result.field_template.filter((field) => field.available && result.records.some((record) => Object.prototype.hasOwnProperty.call(record, field.label)));
-  if (!fields.length) throw new Error("没有可导出的字段");
+function collectionXlsx(products, fields = projectProductFields) {
 
   const escapeXml = (value) => String(value ?? "")
     .replace(/&/g, "&amp;")
@@ -739,7 +817,7 @@ function collectionXlsx(result) {
     }
     return archive;
   };
-  const rows = [fields.map((field) => field.label), ...result.records.map((record) => fields.map((field) => record[field.label] ?? ""))];
+  const rows = [fields.map((field) => field.key), ...products.map((product) => fields.map((field) => product[field.key] ?? ""))];
   const columns = fields.map((field, index) => {
     const longest = Math.max(...rows.map((row) => String(row[index] ?? "").length));
     return `<col min="${index + 1}" max="${index + 1}" width="${Math.min(48, Math.max(10, longest + 2))}" customWidth="1"/>`;
@@ -766,18 +844,35 @@ function collectionXlsx(result) {
   ]);
 }
 
-function downloadCollectionResult(format) {
+async function writeProjectFile(directory, filename, content) {
+  const fileHandle = await directory.getFileHandle(filename, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(content);
+  await writable.close();
+}
+
+function projectFolderName(metadata) {
+  const shortName = String(metadata.category_short || "").replace(/[\\/:*?"<>|]/g, "_").replace(/\s+/g, " ").trim();
+  if (!shortName) throw new Error("请先在页面分析模式采样顶部类目标签，再采集当前页。");
+  const createdAt = new Date(metadata.created_at);
+  const date = Number.isNaN(createdAt.valueOf()) ? new Date() : createdAt;
+  const localDate = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  return `${shortName}_${localDate}`;
+}
+
+async function exportCollectionProject() {
   const result = window.__crawlHubCollectionPreview;
   if (!result) throw new Error("请先提取当前页列表数据");
-  if (format === "csv") {
-    downloadCollectionFile("collection.csv", `\uFEFF${collectionCsv(result)}`, "text/csv;charset=utf-8");
-    return;
-  }
-  if (format === "xlsx") {
-    downloadCollectionFile("collection.xlsx", collectionXlsx(result), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    return;
-  }
-  downloadCollectionFile("collection.json", JSON.stringify(result, null, 2), "application/json;charset=utf-8");
+  if (typeof window.showDirectoryPicker !== "function") throw new Error("当前浏览器不支持项目文件夹导出，请使用最新版 Chrome。");
+  const project = collectionProjectData(result);
+  const parentDirectory = await window.showDirectoryPicker({ mode: "readwrite" });
+  const projectDirectory = await parentDirectory.getDirectoryHandle("CrawlHub项目", { create: true });
+  const collectionDirectory = await projectDirectory.getDirectoryHandle(projectFolderName(project.metadata), { create: true });
+  await writeProjectFile(collectionDirectory, "metadata.json", JSON.stringify(project.metadata, null, 2));
+  await writeProjectFile(collectionDirectory, "products.json", JSON.stringify(project.products, null, 2));
+  await writeProjectFile(collectionDirectory, "products.xlsx", collectionXlsx(project.products));
+  await writeProjectFile(collectionDirectory, "products.csv", `\uFEFF${collectionCsv(project.products)}`);
+  return { folder_name: collectionDirectory.name, product_count: project.products.length };
 }
 
 function saveCollectionTemplate() {
@@ -1334,6 +1429,7 @@ function installPanel() {
             <strong>当前页数据提取验证</strong>
             <p>根据表头和行列关系生成字段模板，提取当前已加载的表格或列表数据。</p>
             <div id="collectionState" class="collection-meta">尚未采集</div>
+            <div id="metadataStatus" class="collection-meta">metadata：等待采样顶部类目标签</div>
             <div id="paginationStatus" class="collection-meta">分页状态：未识别</div>
             <ul id="collectionFields" class="collection-fields"><li>字段模板：未生成</li></ul>
             <div id="collectionPreviewTable" class="collection-preview-table">点击“采集当前页”查看示例数据。</div>
@@ -1341,12 +1437,7 @@ function installPanel() {
           </div>
           <div class="actions collection-actions" style="margin-top: 7px;">
             <button id="collectCollection">采集当前页</button>
-            <button id="toggleExports" class="secondary">导出</button>
-            <div id="exportOptions" class="export-options" hidden>
-              <button id="downloadCollectionCsv" class="secondary">CSV</button>
-              <button id="downloadCollectionJson" class="secondary">JSON</button>
-              <button id="downloadCollectionXlsx" class="secondary">Excel</button>
-            </div>
+            <button id="exportProject" class="secondary">导出项目</button>
             <button id="saveCollectionTemplate" class="secondary">保存字段模板</button>
             <button id="clearCollectionData" class="secondary">清除采集数据</button>
           </div>
@@ -1363,16 +1454,13 @@ function installPanel() {
   const analysisModeButton = shadow.querySelector("#analysisMode");
   const collectionModeButton = shadow.querySelector("#collectionMode");
   const collectionState = shadow.querySelector("#collectionState");
+  const metadataStatus = shadow.querySelector("#metadataStatus");
   const paginationStatus = shadow.querySelector("#paginationStatus");
   const collectionFields = shadow.querySelector("#collectionFields");
   const collectionPreviewTable = shadow.querySelector("#collectionPreviewTable");
   const templateStatus = shadow.querySelector("#templateStatus");
   const collectCollectionButton = shadow.querySelector("#collectCollection");
-  const toggleExportsButton = shadow.querySelector("#toggleExports");
-  const exportOptions = shadow.querySelector("#exportOptions");
-  const downloadCollectionCsvButton = shadow.querySelector("#downloadCollectionCsv");
-  const downloadCollectionJsonButton = shadow.querySelector("#downloadCollectionJson");
-  const downloadCollectionXlsxButton = shadow.querySelector("#downloadCollectionXlsx");
+  const exportProjectButton = shadow.querySelector("#exportProject");
   const saveCollectionTemplateButton = shadow.querySelector("#saveCollectionTemplate");
   const clearCollectionDataButton = shadow.querySelector("#clearCollectionData");
   const stateText = shadow.querySelector("#state");
@@ -1413,6 +1501,7 @@ function installPanel() {
     paginationStatus.textContent = pageText;
     if (!result) {
       collectionState.textContent = "尚未采集";
+      metadataStatus.textContent = "metadata：将使用页面分析模式已采样的顶部类目标签";
       renderFieldTemplate(fieldTemplate);
       collectionPreviewTable.textContent = fieldTemplate.length ? "字段模板已保留，点击“采集当前页”生成新结果。" : "点击“采集当前页”查看示例数据。";
       try {
@@ -1421,11 +1510,7 @@ function installPanel() {
         templateStatus.textContent = "当前页面不允许保存字段模板";
       }
       collectCollectionButton.disabled = false;
-      toggleExportsButton.disabled = true;
-      exportOptions.hidden = true;
-      downloadCollectionCsvButton.disabled = true;
-      downloadCollectionJsonButton.disabled = true;
-      downloadCollectionXlsxButton.disabled = true;
+      exportProjectButton.disabled = true;
       saveCollectionTemplateButton.disabled = !fieldTemplate.length;
       clearCollectionDataButton.disabled = true;
       return;
@@ -1434,6 +1519,9 @@ function installPanel() {
     collectionState.textContent = manualState?.last_page
       ? `✓ 第${manualState.last_page}页完成 · 已采集${result.item_count}条${manualState.duplicate ? "（本页已采集，未重复计数）" : ""}`
       : `${sourceLabel} · 当前页商品/条目数量：${result.item_count}`;
+    metadataStatus.textContent = result.metadata?.category_full
+      ? `metadata 类目：${result.metadata.category_full}`
+      : "metadata：未采样顶部类目标签，导出项目时会提示补充采样";
     renderFieldTemplate(result.field_template);
     collectionPreviewTable.replaceChildren();
     if (result.preview_records.length) {
@@ -1469,10 +1557,7 @@ function installPanel() {
       templateStatus.textContent = "当前页面不允许保存字段模板";
     }
     collectCollectionButton.disabled = false;
-    toggleExportsButton.disabled = !result.records.length;
-    downloadCollectionCsvButton.disabled = !result.records.length;
-    downloadCollectionJsonButton.disabled = !result.records.length;
-    downloadCollectionXlsxButton.disabled = !result.records.length;
+    exportProjectButton.disabled = !result.records.length;
     saveCollectionTemplateButton.disabled = !result.field_template.length;
     clearCollectionDataButton.disabled = false;
   };
@@ -1535,7 +1620,19 @@ function installPanel() {
       setMessage(`提取失败：${error.message || "无法读取当前页面"}`, "error");
     }
   });
-  toggleExportsButton.addEventListener("click", () => { exportOptions.hidden = !exportOptions.hidden; });
+  exportProjectButton.addEventListener("click", async () => {
+    try {
+      setMessage("请选择项目保存位置…");
+      const exported = await exportCollectionProject();
+      setMessage(`项目已导出：${exported.folder_name}（${exported.product_count} 条商品）`, "success");
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        setMessage("已取消选择保存位置。", "success");
+        return;
+      }
+      setMessage(`项目导出失败：${error.message || "无法导出"}`, "error");
+    }
+  });
   clearCollectionDataButton.addEventListener("click", () => {
     if (!window.__crawlHubCollectionPreview && !window.__crawlHubManualCollectionPages?.length) return;
     const confirmed = window.confirm("确认清除当前采集结果？\n\n将删除：\n- 已采集数据\n- 当前进度\n\n不会删除字段模板。");
@@ -1543,30 +1640,6 @@ function installPanel() {
     clearCollectionData();
     renderCollection();
     setMessage("采集数据已清除，字段模板已保留。", "success");
-  });
-  downloadCollectionCsvButton.addEventListener("click", () => {
-    try {
-      downloadCollectionResult("csv");
-      setMessage("collection.csv 已下载。", "success");
-    } catch (error) {
-      setMessage(`CSV 导出失败：${error.message || "无法导出"}`, "error");
-    }
-  });
-  downloadCollectionJsonButton.addEventListener("click", () => {
-    try {
-      downloadCollectionResult("json");
-      setMessage("collection.json 已下载。", "success");
-    } catch (error) {
-      setMessage(`JSON 导出失败：${error.message || "无法导出"}`, "error");
-    }
-  });
-  downloadCollectionXlsxButton.addEventListener("click", () => {
-    try {
-      downloadCollectionResult("xlsx");
-      setMessage("collection.xlsx 已下载。", "success");
-    } catch (error) {
-      setMessage(`Excel 导出失败：${error.message || "无法导出"}`, "error");
-    }
   });
   saveCollectionTemplateButton.addEventListener("click", () => {
     try {
@@ -1613,4 +1686,4 @@ function installPanel() {
   return { started: true, already_open: false };
 }
 
-window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, collectCurrentPage, clearCollectionData, collectionCsv, collectionXlsx, downloadCollectionResult, saveCollectionTemplate, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
+window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, collectCurrentPage, clearCollectionData, collectionCsv, collectionXlsx, exportCollectionProject, saveCollectionTemplate, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
