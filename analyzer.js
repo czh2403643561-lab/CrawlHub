@@ -513,6 +513,173 @@ function collectPageData() {
   };
 }
 
+function detectPaginationState() {
+  const isVisible = (element) => {
+    if (!(element instanceof Element)) return false;
+    const style = getComputedStyle(element);
+    return style.display !== "none" && style.visibility !== "hidden" && element.getClientRects().length > 0;
+  };
+  const compactText = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const exactTextElements = Array.from(document.body?.querySelectorAll("*") || []).filter(isVisible).map((element) => ({ element, text: compactText(element.innerText || element.textContent) }));
+  const rangeMatch = exactTextElements.map((item) => ({ ...item, match: item.text.match(/^(\d+)\s*[-–—~]\s*(\d+)\s*[/／]\s*(\d+)$/) })).find((item) => item.match);
+  const perPageMatch = exactTextElements.map((item) => ({ ...item, match: item.text.match(/^(\d+)\s*[/／]\s*(?:page|页)$/i) })).find((item) => item.match);
+  const rangeStart = rangeMatch ? Number(rangeMatch.match[1]) : null;
+  const rangeEnd = rangeMatch ? Number(rangeMatch.match[2]) : null;
+  const totalItems = rangeMatch ? Number(rangeMatch.match[3]) : null;
+  const itemsPerPage = perPageMatch ? Number(perPageMatch.match[1]) : (rangeStart !== null && rangeEnd !== null ? rangeEnd - rangeStart + 1 : null);
+  const interactive = Array.from(document.querySelectorAll("button, a, [role='button'], [role='link']")).filter(isVisible);
+  const currentControl = interactive.find((element) => element.getAttribute("aria-current") === "page")
+    || interactive.find((element) => element.getAttribute("aria-selected") === "true" && /^\d+$/.test(compactText(element.textContent)))
+    || interactive.find((element) => /(?:^|[-_\s])(active|current|selected)(?:$|[-_\s])/i.test(String(element.className || "")) && /^\d+$/.test(compactText(element.textContent)));
+  const currentFromControl = currentControl ? Number(compactText(currentControl.textContent)) : null;
+  const currentPage = rangeStart && itemsPerPage ? Math.ceil(rangeStart / itemsPerPage) : currentFromControl;
+  const totalPages = totalItems && itemsPerPage ? Math.ceil(totalItems / itemsPerPage) : null;
+
+  const paginationContainer = (() => {
+    let current = rangeMatch?.element || perPageMatch?.element || currentControl || null;
+    for (let depth = 0; current && depth < 7; depth += 1, current = current.parentElement) {
+      const controls = Array.from(current.querySelectorAll("button, a, [role='button'], [role='link']")).filter(isVisible);
+      const pageControls = controls.filter((element) => /^\d+$/.test(compactText(element.textContent)));
+      if (pageControls.length >= 2) return current;
+    }
+    return null;
+  })();
+
+  return {
+    range_start: rangeStart,
+    range_end: rangeEnd,
+    total_items: totalItems,
+    items_per_page: itemsPerPage,
+    current_page: currentPage,
+    total_pages: totalPages,
+    range_element: rangeMatch?.element || null,
+    pagination_container: paginationContainer
+  };
+}
+
+function findNextPageControl(paginationState = detectPaginationState()) {
+  const isVisible = (element) => {
+    if (!(element instanceof Element)) return false;
+    const style = getComputedStyle(element);
+    return style.display !== "none" && style.visibility !== "hidden" && element.getClientRects().length > 0;
+  };
+  const compactText = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const isDisabled = (element) => element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true" || /(?:^|[-_\s])disabled(?:$|[-_\s])/i.test(String(element.className || ""));
+  const root = paginationState.pagination_container || document;
+  const controls = Array.from(root.querySelectorAll("button, a, [role='button'], [role='link']")).filter((element) => isVisible(element) && !isDisabled(element));
+  const semantic = controls.find((element) => /(?:next|下一页|下页|后页|›|»|＞)/i.test([element.getAttribute("aria-label"), element.getAttribute("title"), compactText(element.textContent)].filter(Boolean).join(" ")));
+  if (semantic) return semantic;
+  if (!paginationState.current_page || !paginationState.total_pages || paginationState.current_page >= paginationState.total_pages) return null;
+  const fallback = controls.filter((element) => {
+    const text = compactText(element.textContent);
+    return !/^\d+$/.test(text) && !/^\d+\s*[/／]\s*(?:page|页)$/i.test(text) && !/^…$|^\.\.\.$/.test(text);
+  });
+  return fallback.at(-1) || null;
+}
+
+function mergeCollectionResults(results, pagination) {
+  const first = results[0];
+  if (!first) throw new Error("没有可合并的采集结果");
+  const seen = new Set();
+  const records = [];
+  for (const result of results) {
+    for (const record of result.records) {
+      const key = record["排名"] ?? `${record["商品名称"] || ""}|${record["店铺"] || ""}|${record["图片"] || ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      records.push(record);
+    }
+  }
+  return {
+    ...first,
+    source_type: "paginated_table",
+    item_count: records.length,
+    records,
+    preview_records: records.slice(0, 5),
+    pagination: {
+      total_items: pagination.total_items,
+      items_per_page: pagination.items_per_page,
+      total_pages: pagination.total_pages,
+      collected_pages: results.length
+    }
+  };
+}
+
+function waitForPageUpdate(previousSignature, previousPage, timeoutMs = 12000) {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    const check = () => {
+      if (window.__crawlHubPaginationState?.cancelled) {
+        reject(new Error("分页采集已停止"));
+        return;
+      }
+      const state = detectPaginationState();
+      const result = collectPageData();
+      const signature = JSON.stringify(result.records.slice(0, 3));
+      if ((state.current_page && state.current_page !== previousPage) || signature !== previousSignature) {
+        resolve({ state, result, signature });
+        return;
+      }
+      if (Date.now() >= deadline) {
+        reject(new Error("等待下一页列表更新超时"));
+        return;
+      }
+      setTimeout(check, 250);
+    };
+    setTimeout(check, 250);
+  });
+}
+
+async function startPaginatedCollection() {
+  if (window.__crawlHubPaginationState?.active) throw new Error("分页采集正在进行");
+  const initialState = detectPaginationState();
+  if (!initialState.current_page || !initialState.total_pages || !initialState.total_items || !initialState.items_per_page) {
+    throw new Error("未识别到完整分页状态，请确认页面显示范围、总数和每页数量");
+  }
+  const paginationState = {
+    active: true,
+    cancelled: false,
+    current_page: initialState.current_page,
+    total_pages: initialState.total_pages,
+    total_items: initialState.total_items,
+    items_per_page: initialState.items_per_page,
+    collected_items: 0
+  };
+  window.__crawlHubPaginationState = paginationState;
+  const results = [];
+  const notify = () => window.__crawlHubPaginationChanged?.();
+  try {
+    let state = initialState;
+    let currentResult = collectPageData();
+    while (true) {
+      if (paginationState.cancelled) throw new Error("分页采集已停止");
+      results.push(currentResult);
+      const merged = mergeCollectionResults(results, { ...state, ...paginationState });
+      paginationState.current_page = state.current_page || paginationState.current_page;
+      paginationState.collected_items = merged.item_count;
+      window.__crawlHubCollectionPreview = merged;
+      notify();
+      if (paginationState.current_page >= paginationState.total_pages) return merged;
+
+      const next = findNextPageControl({ ...state, ...paginationState });
+      if (!next) throw new Error("未找到可用的下一页控件");
+      const signature = JSON.stringify(currentResult.records.slice(0, 3));
+      next.scrollIntoView({ block: "center", inline: "nearest" });
+      next.click();
+      const updated = await waitForPageUpdate(signature, paginationState.current_page);
+      state = updated.state;
+      currentResult = updated.result;
+    }
+  } finally {
+    paginationState.active = false;
+    notify();
+  }
+}
+
+function stopPaginatedCollection() {
+  if (window.__crawlHubPaginationState?.active) window.__crawlHubPaginationState.cancelled = true;
+}
+
 function downloadCollectionFile(filename, content, mimeType) {
   const blobUrl = URL.createObjectURL(new Blob([content], { type: mimeType }));
   const anchor = document.createElement("a");
@@ -1203,12 +1370,15 @@ function installPanel() {
             <strong>当前页数据提取验证</strong>
             <p>根据表头和行列关系生成字段模板，提取当前已加载的表格或列表数据。</p>
             <div id="collectionState" class="collection-meta">尚未提取</div>
+            <div id="paginationStatus" class="collection-meta">分页状态：未识别</div>
             <ul id="collectionFields" class="collection-fields"><li>字段模板：未生成</li></ul>
             <div id="collectionPreviewTable" class="collection-preview-table">点击“提取当前页列表”查看示例数据。</div>
             <div id="templateStatus" class="collection-meta">字段模板尚未保存</div>
           </div>
           <div class="actions" style="margin-top: 10px;">
             <button id="extractCollection">提取当前页列表</button>
+            <button id="startPagination" class="secondary">自动采集全部页</button>
+            <button id="stopPagination" class="secondary" disabled>停止分页采集</button>
             <button id="downloadCollectionCsv" class="secondary">导出 CSV</button>
             <button id="downloadCollectionJson" class="secondary">导出 JSON</button>
             <button id="downloadCollectionXlsx" class="secondary">导出 Excel</button>
@@ -1228,10 +1398,13 @@ function installPanel() {
   const analysisModeButton = shadow.querySelector("#analysisMode");
   const collectionModeButton = shadow.querySelector("#collectionMode");
   const collectionState = shadow.querySelector("#collectionState");
+  const paginationStatus = shadow.querySelector("#paginationStatus");
   const collectionFields = shadow.querySelector("#collectionFields");
   const collectionPreviewTable = shadow.querySelector("#collectionPreviewTable");
   const templateStatus = shadow.querySelector("#templateStatus");
   const extractCollectionButton = shadow.querySelector("#extractCollection");
+  const startPaginationButton = shadow.querySelector("#startPagination");
+  const stopPaginationButton = shadow.querySelector("#stopPagination");
   const downloadCollectionCsvButton = shadow.querySelector("#downloadCollectionCsv");
   const downloadCollectionJsonButton = shadow.querySelector("#downloadCollectionJson");
   const downloadCollectionXlsxButton = shadow.querySelector("#downloadCollectionXlsx");
@@ -1251,9 +1424,25 @@ function installPanel() {
   };
   const renderCollection = () => {
     const result = window.__crawlHubCollectionPreview;
-    if (!result) return;
-    const sourceLabel = result.source_type === "table" ? "表格" : result.source_type === "list" ? "列表" : "未找到可提取的表格或列表";
-    collectionState.textContent = `${sourceLabel} · 当前页商品/条目数量：${result.item_count}`;
+    const pagination = window.__crawlHubPaginationState;
+    const pageState = detectPaginationState();
+    const pageText = pageState.current_page && pageState.total_pages
+      ? `当前：第${pageState.current_page}页 / ${pageState.total_pages}页`
+      : "分页状态：未识别";
+    paginationStatus.textContent = pagination?.active
+      ? `当前：第${pagination.current_page}页 / ${pagination.total_pages}页`
+      : pageText;
+    if (!result) {
+      collectionState.textContent = "尚未提取";
+      extractCollectionButton.disabled = Boolean(pagination?.active);
+      startPaginationButton.disabled = Boolean(pagination?.active) || !pageState.current_page || !pageState.total_pages || !pageState.total_items || !pageState.items_per_page;
+      stopPaginationButton.disabled = !pagination?.active;
+      return;
+    }
+    const sourceLabel = result.source_type === "table" ? "表格" : result.source_type === "list" ? "列表" : result.source_type === "paginated_table" ? "分页表格" : "未找到可提取的表格或列表";
+    collectionState.textContent = pagination?.active
+      ? `自动采集中 · 已采集：${pagination.collected_items} / ${pagination.total_items}`
+      : result.pagination ? `分页采集完成 · 已采集：${result.item_count} / ${result.pagination.total_items}` : `${sourceLabel} · 当前页商品/条目数量：${result.item_count}`;
     collectionFields.replaceChildren();
     result.field_template.forEach((field) => {
       const row = document.createElement("li");
@@ -1293,10 +1482,14 @@ function installPanel() {
     } catch {
       templateStatus.textContent = "当前页面不允许保存字段模板";
     }
-    downloadCollectionCsvButton.disabled = !result.records.length;
-    downloadCollectionJsonButton.disabled = !result.records.length;
-    downloadCollectionXlsxButton.disabled = !result.records.length;
-    saveCollectionTemplateButton.disabled = !result.field_template.length;
+    const collectionActive = Boolean(pagination?.active);
+    extractCollectionButton.disabled = collectionActive;
+    startPaginationButton.disabled = collectionActive || !pageState.current_page || !pageState.total_pages || !pageState.total_items || !pageState.items_per_page;
+    stopPaginationButton.disabled = !collectionActive;
+    downloadCollectionCsvButton.disabled = collectionActive || !result.records.length;
+    downloadCollectionJsonButton.disabled = collectionActive || !result.records.length;
+    downloadCollectionXlsxButton.disabled = collectionActive || !result.records.length;
+    saveCollectionTemplateButton.disabled = collectionActive || !result.field_template.length;
   };
   const setMode = (mode) => {
     window.__crawlHubMode = mode;
@@ -1337,6 +1530,7 @@ function installPanel() {
   };
 
   window.__crawlHubSamplingChanged = render;
+  window.__crawlHubPaginationChanged = renderCollection;
   analysisModeButton.addEventListener("click", () => setMode("analysis"));
   collectionModeButton.addEventListener("click", () => {
     setMode("collection");
@@ -1352,6 +1546,24 @@ function installPanel() {
     } catch (error) {
       setMessage(`提取失败：${error.message || "无法读取当前页面"}`, "error");
     }
+  });
+  startPaginationButton.addEventListener("click", async () => {
+    try {
+      const run = startPaginatedCollection();
+      renderCollection();
+      setMessage("正在自动采集分页数据，请保持页面打开。", "success");
+      const result = await run;
+      window.__crawlHubCollectionPreview = result;
+      renderCollection();
+      setMessage(`分页采集完成，共 ${result.item_count} 条数据。`, "success");
+    } catch (error) {
+      renderCollection();
+      setMessage(`分页采集失败：${error.message || "无法完成"}`, "error");
+    }
+  });
+  stopPaginationButton.addEventListener("click", () => {
+    stopPaginatedCollection();
+    setMessage("正在停止分页采集，当前已采集数据会保留。", "success");
   });
   downloadCollectionCsvButton.addEventListener("click", () => {
     try {
@@ -1417,9 +1629,10 @@ function installPanel() {
     host.remove();
     delete window.__crawlHubPanelHost;
     delete window.__crawlHubSamplingChanged;
+    delete window.__crawlHubPaginationChanged;
   });
   setMode(window.__crawlHubMode || "analysis");
   return { started: true, already_open: false };
 }
 
-window.__crawlHub = { analyzePage, collectPageData, collectionCsv, collectionXlsx, downloadCollectionResult, saveCollectionTemplate, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
+window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, findNextPageControl, startPaginatedCollection, stopPaginatedCollection, collectionCsv, collectionXlsx, downloadCollectionResult, saveCollectionTemplate, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
