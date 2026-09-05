@@ -1,3 +1,5 @@
+(() => {
+
 function analyzePage() {
   const LIMITS = {
     textNodes: 2000,
@@ -1341,7 +1343,7 @@ function stopElementSampling() {
 }
 
 function installPanel() {
-  const panelVersion = "metadata-auto-v2";
+  const panelVersion = "metadata-auto-v3";
   if (window.__crawlHubPanelHost) {
     if (window.__crawlHubPanelHost.dataset.crawlHubPanelVersion !== panelVersion) {
       stopElementSampling();
@@ -1695,3 +1697,5 @@ function installPanel() {
 }
 
 window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, collectCurrentPage, clearCollectionData, collectionXlsx, exportCollectionProject, saveCollectionTemplate, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
+
+})();
