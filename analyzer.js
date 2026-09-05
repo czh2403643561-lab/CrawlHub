@@ -644,7 +644,7 @@ function clearCollectionData() {
   return { cleared: true };
 }
 
-function collectCurrentPage() {
+async function collectCurrentPage() {
   const result = collectPageData();
   const pagination = detectPaginationState();
   const environment = collectionEnvironment(result, pagination);
@@ -688,6 +688,8 @@ function collectCurrentPage() {
       collected_pages: pages.length
     }
   };
+  const savedProject = await saveInternalProject(merged);
+  merged.project_id = savedProject.project_id;
   window.__crawlHubCollectionEnvironment = { ...environment, signature: JSON.stringify(environment) };
   window.__crawlHubCollectionFieldTemplate = result.field_template;
   window.__crawlHubCollectionRawColumns = result.raw_columns;
@@ -709,6 +711,7 @@ const projectProductFields = [
   { key: "image", label: "图片" },
   { key: "price", label: "价格范围" },
   { key: "rating", label: "商品评分" },
+  { key: "review_count", label: "评价数量" },
   { key: "gmv", label: "GMV" },
   { key: "clicks", label: "点击次数" },
   { key: "ctr", label: "点击率" },
@@ -725,6 +728,7 @@ function collectionProjectData(result) {
     image: record["图片"] ?? null,
     price: record["价格范围"] ?? null,
     rating: record["商品评分"] ?? null,
+    review_count: record["评价数量"] ?? null,
     gmv: record["GMV"] ?? null,
     clicks: record["点击次数"] ?? null,
     ctr: record["点击率"] ?? null,
@@ -733,16 +737,44 @@ function collectionProjectData(result) {
   }));
   return {
     metadata: {
-      category_full: metadata.category_full || null,
-      category_short: metadata.category_short || null,
-      category: metadata.category || metadata.category_full || "未识别",
-      created_at: metadata.created_at || new Date().toISOString(),
-      page_title: metadata.page_title || null,
-      rank_type: metadata.rank_type || "未识别",
-      url: metadata.url || location.href
+      category_full: metadata.category_full || "未识别",
+      category_short: metadata.category_short || "未识别",
+      page_title: metadata.page_title || "未识别",
+      url: metadata.url || location.href,
+      created_at: metadata.created_at || new Date().toISOString()
     },
     products
   };
+}
+
+function projectStorageRequest(type, payload = {}) {
+  return new Promise((resolve, reject) => {
+    const requestId = `crawlHub-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const timeout = setTimeout(() => {
+      document.removeEventListener("crawlHub:storage-response", onResponse);
+      reject(new Error("本地项目数据服务未连接，请重新打开插件面板后再试"));
+    }, 3000);
+    const onResponse = (event) => {
+      const response = event.detail;
+      if (response?.request_id !== requestId) return;
+      clearTimeout(timeout);
+      document.removeEventListener("crawlHub:storage-response", onResponse);
+      if (!response.ok) reject(new Error(response.error || "本地项目数据操作失败"));
+      else resolve(response);
+    };
+    document.addEventListener("crawlHub:storage-response", onResponse);
+    document.dispatchEvent(new CustomEvent("crawlHub:storage-request", {
+      detail: { request_id: requestId, type, ...payload }
+    }));
+  });
+}
+
+async function saveInternalProject(result) {
+  const project = collectionProjectData(result);
+  const projectId = projectFolderName(project.metadata);
+  const response = await projectStorageRequest("crawlHub:save-project", { project_id: projectId, project });
+  window.__crawlHubCurrentProjectId = projectId;
+  return response.project;
 }
 
 function collectionXlsx(products, fields = projectProductFields) {
@@ -868,7 +900,10 @@ async function exportCollectionProject() {
   const result = window.__crawlHubCollectionPreview;
   if (!result) throw new Error("请先提取当前页列表数据");
   if (typeof window.showDirectoryPicker !== "function") throw new Error("当前浏览器不支持项目文件夹导出，请使用最新版 Chrome。");
-  const project = collectionProjectData(result);
+  const projectId = window.__crawlHubCurrentProjectId || projectFolderName(collectionProjectData(result).metadata);
+  const stored = await projectStorageRequest("crawlHub:read-project", { project_id: projectId });
+  const project = stored.project;
+  if (!project) throw new Error("未找到已保存的项目数据，请重新采集当前页");
   const parentDirectory = await window.showDirectoryPicker({ mode: "readwrite" });
   const projectDirectory = await parentDirectory.getDirectoryHandle("CrawlHub项目", { create: true });
   const collectionDirectory = await projectDirectory.getDirectoryHandle(projectFolderName(project.metadata), { create: true });
@@ -1527,7 +1562,7 @@ function installPanel() {
     }
     const sourceLabel = result.source_type === "table" ? "表格" : result.source_type === "list" ? "列表" : result.source_type === "paginated_table" || result.source_type === "manual_paginated_table" ? "分页表格" : "未找到可提取的表格或列表";
     collectionState.textContent = manualState?.last_page
-      ? `✓ 第${manualState.last_page}页完成 · 已采集${result.item_count}条${manualState.duplicate ? "（本页已采集，未重复计数）" : ""}`
+      ? `✓ 第${manualState.last_page}页完成 · 已采集${result.item_count}条 · 已保存到本地项目${manualState.duplicate ? "（本页已采集，未重复计数）" : ""}`
       : `${sourceLabel} · 当前页商品/条目数量：${result.item_count}`;
     metadataStatus.textContent = result.metadata?.category_full === "未识别"
       ? "metadata 类目：未识别（仍可导出项目）"
@@ -1615,19 +1650,22 @@ function installPanel() {
     setMode("collection");
     setMessage("可提取当前页已加载的数据；不会翻页或发送页面数据。", "success");
   });
-  collectCollectionButton.addEventListener("click", () => {
+  collectCollectionButton.addEventListener("click", async () => {
     try {
       setMessage("采集中…");
-      const collected = collectCurrentPage();
+      collectCollectionButton.disabled = true;
+      const collected = await collectCurrentPage();
       if (collected.cancelled) {
         renderCollection();
         setMessage("已取消新采集任务，原采集结果保留。", "success");
         return;
       }
       renderCollection();
-      setMessage(collected.duplicate ? "✓ 当前页完成：本页已采集，未重复计数。" : `✓ 当前页完成：已采集 ${collected.result.item_count} 条。`, "success");
+      setMessage(collected.duplicate ? "✓ 当前页完成：本页已采集，未重复计数，已保存到本地项目。" : `✓ 当前页完成：已采集 ${collected.result.item_count} 条，已保存到本地项目。`, "success");
     } catch (error) {
       setMessage(`提取失败：${error.message || "无法读取当前页面"}`, "error");
+    } finally {
+      collectCollectionButton.disabled = false;
     }
   });
   exportProjectButton.addEventListener("click", async () => {

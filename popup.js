@@ -10,6 +10,7 @@ async function openPanel() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tabs[0]?.id) throw new Error("没有找到当前页面。");
   const target = { tabId: tabs[0].id };
+  await chrome.scripting.executeScript({ target, files: ["content.js"] });
   await chrome.scripting.executeScript({ target, files: ["analyzer.js"], world: "MAIN" });
   const execution = await chrome.scripting.executeScript({
     target,
