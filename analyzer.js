@@ -557,127 +557,50 @@ function detectPaginationState() {
   };
 }
 
-function findNextPageControl(paginationState = detectPaginationState()) {
-  const isVisible = (element) => {
-    if (!(element instanceof Element)) return false;
-    const style = getComputedStyle(element);
-    return style.display !== "none" && style.visibility !== "hidden" && element.getClientRects().length > 0;
-  };
-  const compactText = (value) => String(value || "").replace(/\s+/g, " ").trim();
-  const isDisabled = (element) => element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true" || /(?:^|[-_\s])disabled(?:$|[-_\s])/i.test(String(element.className || ""));
-  const root = paginationState.pagination_container || document;
-  const controls = Array.from(root.querySelectorAll("button, a, [role='button'], [role='link']")).filter((element) => isVisible(element) && !isDisabled(element));
-  const semantic = controls.find((element) => /(?:next|下一页|下页|后页|›|»|＞)/i.test([element.getAttribute("aria-label"), element.getAttribute("title"), compactText(element.textContent)].filter(Boolean).join(" ")));
-  if (semantic) return semantic;
-  if (!paginationState.current_page || !paginationState.total_pages || paginationState.current_page >= paginationState.total_pages) return null;
-  const fallback = controls.filter((element) => {
-    const text = compactText(element.textContent);
-    return !/^\d+$/.test(text) && !/^\d+\s*[/／]\s*(?:page|页)$/i.test(text) && !/^…$|^\.\.\.$/.test(text);
-  });
-  return fallback.at(-1) || null;
-}
-
-function mergeCollectionResults(results, pagination) {
-  const first = results[0];
-  if (!first) throw new Error("没有可合并的采集结果");
+function collectCurrentPage() {
+  const result = collectPageData();
+  const pagination = detectPaginationState();
+  const pageKey = pagination.current_page ? `page:${pagination.current_page}` : `records:${JSON.stringify(result.records)}`;
+  if (!Array.isArray(window.__crawlHubManualCollectionPages)) window.__crawlHubManualCollectionPages = [];
+  const alreadyCollected = window.__crawlHubManualCollectionPages.some((page) => page.key === pageKey);
+  if (!alreadyCollected) {
+    window.__crawlHubManualCollectionPages.push({
+      key: pageKey,
+      page: pagination.current_page,
+      result
+    });
+  }
+  const pages = window.__crawlHubManualCollectionPages;
   const seen = new Set();
   const records = [];
-  for (const result of results) {
-    for (const record of result.records) {
-      const key = record["排名"] ?? `${record["商品名称"] || ""}|${record["店铺"] || ""}|${record["图片"] || ""}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      records.push(record);
-    }
-  }
-  return {
-    ...first,
-    source_type: "paginated_table",
+  pages.forEach((page) => page.result.records.forEach((record) => {
+    const key = record["排名"] ?? `${record["商品名称"] || ""}|${record["店铺"] || ""}|${record["图片"] || ""}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    records.push(record);
+  }));
+  const merged = {
+    ...result,
+    source_type: pages.length > 1 ? "manual_paginated_table" : result.source_type,
     item_count: records.length,
     records,
     preview_records: records.slice(0, 5),
     pagination: {
+      current_page: pagination.current_page,
       total_items: pagination.total_items,
       items_per_page: pagination.items_per_page,
       total_pages: pagination.total_pages,
-      collected_pages: results.length
+      collected_pages: pages.length
     }
   };
-}
-
-function waitForPageUpdate(previousSignature, previousPage, timeoutMs = 12000) {
-  return new Promise((resolve, reject) => {
-    const deadline = Date.now() + timeoutMs;
-    const check = () => {
-      if (window.__crawlHubPaginationState?.cancelled) {
-        reject(new Error("分页采集已停止"));
-        return;
-      }
-      const state = detectPaginationState();
-      const result = collectPageData();
-      const signature = JSON.stringify(result.records.slice(0, 3));
-      if ((state.current_page && state.current_page !== previousPage) || signature !== previousSignature) {
-        resolve({ state, result, signature });
-        return;
-      }
-      if (Date.now() >= deadline) {
-        reject(new Error("等待下一页列表更新超时"));
-        return;
-      }
-      setTimeout(check, 250);
-    };
-    setTimeout(check, 250);
-  });
-}
-
-async function startPaginatedCollection() {
-  if (window.__crawlHubPaginationState?.active) throw new Error("分页采集正在进行");
-  const initialState = detectPaginationState();
-  if (!initialState.current_page || !initialState.total_pages || !initialState.total_items || !initialState.items_per_page) {
-    throw new Error("未识别到完整分页状态，请确认页面显示范围、总数和每页数量");
-  }
-  const paginationState = {
-    active: true,
-    cancelled: false,
-    current_page: initialState.current_page,
-    total_pages: initialState.total_pages,
-    total_items: initialState.total_items,
-    items_per_page: initialState.items_per_page,
-    collected_items: 0
+  window.__crawlHubCollectionPreview = merged;
+  window.__crawlHubManualCollectionState = {
+    last_page: pagination.current_page,
+    collected_pages: pages.length,
+    collected_items: records.length,
+    duplicate: alreadyCollected
   };
-  window.__crawlHubPaginationState = paginationState;
-  const results = [];
-  const notify = () => window.__crawlHubPaginationChanged?.();
-  try {
-    let state = initialState;
-    let currentResult = collectPageData();
-    while (true) {
-      if (paginationState.cancelled) throw new Error("分页采集已停止");
-      results.push(currentResult);
-      const merged = mergeCollectionResults(results, { ...state, ...paginationState });
-      paginationState.current_page = state.current_page || paginationState.current_page;
-      paginationState.collected_items = merged.item_count;
-      window.__crawlHubCollectionPreview = merged;
-      notify();
-      if (paginationState.current_page >= paginationState.total_pages) return merged;
-
-      const next = findNextPageControl({ ...state, ...paginationState });
-      if (!next) throw new Error("未找到可用的下一页控件");
-      const signature = JSON.stringify(currentResult.records.slice(0, 3));
-      next.scrollIntoView({ block: "center", inline: "nearest" });
-      next.click();
-      const updated = await waitForPageUpdate(signature, paginationState.current_page);
-      state = updated.state;
-      currentResult = updated.result;
-    }
-  } finally {
-    paginationState.active = false;
-    notify();
-  }
-}
-
-function stopPaginatedCollection() {
-  if (window.__crawlHubPaginationState?.active) window.__crawlHubPaginationState.cancelled = true;
+  return { result: merged, pagination, duplicate: alreadyCollected };
 }
 
 function downloadCollectionFile(filename, content, mimeType) {
@@ -1332,18 +1255,22 @@ function installPanel() {
       .mode-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 10px; padding: 3px; border-radius: 7px; background: #e5eaf3; }
       .mode-switch button { border: 0; border-radius: 5px; padding: 7px 8px; color: #667085; background: transparent; cursor: pointer; font: inherit; font-weight: 600; }
       .mode-switch button.active { color: #315efb; background: #fff; box-shadow: 0 1px 3px rgba(16,24,40,.12); }
-      .collection-card { border-radius: 7px; padding: 11px; background: #fff; color: #475467; }
+      .collection-card { border-radius: 7px; padding: 9px; background: #fff; color: #475467; }
       .collection-card strong { color: #172033; }
-      .collection-card p { margin: 7px 0 0; }
+      .collection-card p { margin: 5px 0 0; }
       .collection-meta { margin: 9px 0; color: #344054; }
-      .collection-fields { max-height: 120px; margin: 0; padding: 0; overflow: auto; list-style: none; }
-      .collection-fields li { margin-top: 5px; border-radius: 5px; padding: 6px 7px; background: #f6f8fc; overflow-wrap: anywhere; font-size: 12px; }
+      .collection-fields { max-height: 84px; margin: 0; padding: 0; overflow: auto; list-style: none; }
+      .collection-fields li { margin-top: 4px; border-radius: 5px; padding: 5px 7px; background: #f6f8fc; overflow-wrap: anywhere; font-size: 12px; }
       .collection-fields li:first-child { margin-top: 0; }
-      .collection-preview-table { max-height: 190px; margin-top: 9px; overflow: auto; border: 1px solid #e4e7ec; border-radius: 6px; background: #fff; }
+      .collection-preview-table { max-height: 140px; margin-top: 7px; overflow: auto; border: 1px solid #e4e7ec; border-radius: 6px; background: #fff; }
       .collection-preview-table table { width: 100%; border-collapse: collapse; font-size: 11px; }
       .collection-preview-table th, .collection-preview-table td { min-width: 84px; max-width: 180px; padding: 6px; border-bottom: 1px solid #eaecf0; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
       .collection-preview-table th { position: sticky; top: 0; color: #344054; background: #f6f8fc; }
       .collection-preview-table td { color: #475467; }
+      .collection-actions { gap: 5px; }
+      .collection-actions button { padding: 6px 8px; }
+      .export-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+      .export-options[hidden] { display: none; }
       .view[hidden], .content[hidden] { display: none; }
     </style>
     <div class="panel">
@@ -1369,21 +1296,21 @@ function installPanel() {
           <div class="collection-card">
             <strong>当前页数据提取验证</strong>
             <p>根据表头和行列关系生成字段模板，提取当前已加载的表格或列表数据。</p>
-            <div id="collectionState" class="collection-meta">尚未提取</div>
+            <div id="collectionState" class="collection-meta">尚未采集</div>
             <div id="paginationStatus" class="collection-meta">分页状态：未识别</div>
             <ul id="collectionFields" class="collection-fields"><li>字段模板：未生成</li></ul>
-            <div id="collectionPreviewTable" class="collection-preview-table">点击“提取当前页列表”查看示例数据。</div>
+            <div id="collectionPreviewTable" class="collection-preview-table">点击“采集当前页”查看示例数据。</div>
             <div id="templateStatus" class="collection-meta">字段模板尚未保存</div>
           </div>
-          <div class="actions" style="margin-top: 10px;">
-            <button id="extractCollection">提取当前页列表</button>
-            <button id="startPagination" class="secondary">自动采集全部页</button>
-            <button id="stopPagination" class="secondary" disabled>停止分页采集</button>
-            <button id="downloadCollectionCsv" class="secondary">导出 CSV</button>
-            <button id="downloadCollectionJson" class="secondary">导出 JSON</button>
-            <button id="downloadCollectionXlsx" class="secondary">导出 Excel</button>
+          <div class="actions collection-actions" style="margin-top: 7px;">
+            <button id="collectCollection">采集当前页</button>
+            <button id="toggleExports" class="secondary">导出</button>
+            <div id="exportOptions" class="export-options" hidden>
+              <button id="downloadCollectionCsv" class="secondary">CSV</button>
+              <button id="downloadCollectionJson" class="secondary">JSON</button>
+              <button id="downloadCollectionXlsx" class="secondary">Excel</button>
+            </div>
             <button id="saveCollectionTemplate" class="secondary">保存字段模板</button>
-            <button id="backToAnalysis" class="secondary">返回页面分析</button>
           </div>
         </div>
         <div id="message" class="message"></div>
@@ -1402,9 +1329,9 @@ function installPanel() {
   const collectionFields = shadow.querySelector("#collectionFields");
   const collectionPreviewTable = shadow.querySelector("#collectionPreviewTable");
   const templateStatus = shadow.querySelector("#templateStatus");
-  const extractCollectionButton = shadow.querySelector("#extractCollection");
-  const startPaginationButton = shadow.querySelector("#startPagination");
-  const stopPaginationButton = shadow.querySelector("#stopPagination");
+  const collectCollectionButton = shadow.querySelector("#collectCollection");
+  const toggleExportsButton = shadow.querySelector("#toggleExports");
+  const exportOptions = shadow.querySelector("#exportOptions");
   const downloadCollectionCsvButton = shadow.querySelector("#downloadCollectionCsv");
   const downloadCollectionJsonButton = shadow.querySelector("#downloadCollectionJson");
   const downloadCollectionXlsxButton = shadow.querySelector("#downloadCollectionXlsx");
@@ -1424,25 +1351,26 @@ function installPanel() {
   };
   const renderCollection = () => {
     const result = window.__crawlHubCollectionPreview;
-    const pagination = window.__crawlHubPaginationState;
+    const manualState = window.__crawlHubManualCollectionState;
     const pageState = detectPaginationState();
     const pageText = pageState.current_page && pageState.total_pages
       ? `当前：第${pageState.current_page}页 / ${pageState.total_pages}页`
       : "分页状态：未识别";
-    paginationStatus.textContent = pagination?.active
-      ? `当前：第${pagination.current_page}页 / ${pagination.total_pages}页`
-      : pageText;
+    paginationStatus.textContent = pageText;
     if (!result) {
-      collectionState.textContent = "尚未提取";
-      extractCollectionButton.disabled = Boolean(pagination?.active);
-      startPaginationButton.disabled = Boolean(pagination?.active) || !pageState.current_page || !pageState.total_pages || !pageState.total_items || !pageState.items_per_page;
-      stopPaginationButton.disabled = !pagination?.active;
+      collectionState.textContent = "尚未采集";
+      collectCollectionButton.disabled = false;
+      toggleExportsButton.disabled = true;
+      exportOptions.hidden = true;
+      downloadCollectionCsvButton.disabled = true;
+      downloadCollectionJsonButton.disabled = true;
+      downloadCollectionXlsxButton.disabled = true;
       return;
     }
-    const sourceLabel = result.source_type === "table" ? "表格" : result.source_type === "list" ? "列表" : result.source_type === "paginated_table" ? "分页表格" : "未找到可提取的表格或列表";
-    collectionState.textContent = pagination?.active
-      ? `自动采集中 · 已采集：${pagination.collected_items} / ${pagination.total_items}`
-      : result.pagination ? `分页采集完成 · 已采集：${result.item_count} / ${result.pagination.total_items}` : `${sourceLabel} · 当前页商品/条目数量：${result.item_count}`;
+    const sourceLabel = result.source_type === "table" ? "表格" : result.source_type === "list" ? "列表" : result.source_type === "paginated_table" || result.source_type === "manual_paginated_table" ? "分页表格" : "未找到可提取的表格或列表";
+    collectionState.textContent = manualState?.last_page
+      ? `✓ 第${manualState.last_page}页完成 · 已采集${result.item_count}条${manualState.duplicate ? "（本页已采集，未重复计数）" : ""}`
+      : `${sourceLabel} · 当前页商品/条目数量：${result.item_count}`;
     collectionFields.replaceChildren();
     result.field_template.forEach((field) => {
       const row = document.createElement("li");
@@ -1482,14 +1410,12 @@ function installPanel() {
     } catch {
       templateStatus.textContent = "当前页面不允许保存字段模板";
     }
-    const collectionActive = Boolean(pagination?.active);
-    extractCollectionButton.disabled = collectionActive;
-    startPaginationButton.disabled = collectionActive || !pageState.current_page || !pageState.total_pages || !pageState.total_items || !pageState.items_per_page;
-    stopPaginationButton.disabled = !collectionActive;
-    downloadCollectionCsvButton.disabled = collectionActive || !result.records.length;
-    downloadCollectionJsonButton.disabled = collectionActive || !result.records.length;
-    downloadCollectionXlsxButton.disabled = collectionActive || !result.records.length;
-    saveCollectionTemplateButton.disabled = collectionActive || !result.field_template.length;
+    collectCollectionButton.disabled = false;
+    toggleExportsButton.disabled = !result.records.length;
+    downloadCollectionCsvButton.disabled = !result.records.length;
+    downloadCollectionJsonButton.disabled = !result.records.length;
+    downloadCollectionXlsxButton.disabled = !result.records.length;
+    saveCollectionTemplateButton.disabled = !result.field_template.length;
   };
   const setMode = (mode) => {
     window.__crawlHubMode = mode;
@@ -1530,41 +1456,22 @@ function installPanel() {
   };
 
   window.__crawlHubSamplingChanged = render;
-  window.__crawlHubPaginationChanged = renderCollection;
   analysisModeButton.addEventListener("click", () => setMode("analysis"));
   collectionModeButton.addEventListener("click", () => {
     setMode("collection");
     setMessage("可提取当前页已加载的数据；不会翻页或发送页面数据。", "success");
   });
-  shadow.querySelector("#backToAnalysis").addEventListener("click", () => setMode("analysis"));
-  extractCollectionButton.addEventListener("click", () => {
+  collectCollectionButton.addEventListener("click", () => {
     try {
-      const result = collectPageData();
-      window.__crawlHubCollectionPreview = result;
+      setMessage("采集中…");
+      const collected = collectCurrentPage();
       renderCollection();
-      setMessage(result.item_count ? `已提取当前页 ${result.item_count} 条数据。` : "未找到可提取的表格或列表数据。", result.item_count ? "success" : "error");
+      setMessage(collected.duplicate ? "✓ 当前页完成：本页已采集，未重复计数。" : `✓ 当前页完成：已采集 ${collected.result.item_count} 条。`, "success");
     } catch (error) {
       setMessage(`提取失败：${error.message || "无法读取当前页面"}`, "error");
     }
   });
-  startPaginationButton.addEventListener("click", async () => {
-    try {
-      const run = startPaginatedCollection();
-      renderCollection();
-      setMessage("正在自动采集分页数据，请保持页面打开。", "success");
-      const result = await run;
-      window.__crawlHubCollectionPreview = result;
-      renderCollection();
-      setMessage(`分页采集完成，共 ${result.item_count} 条数据。`, "success");
-    } catch (error) {
-      renderCollection();
-      setMessage(`分页采集失败：${error.message || "无法完成"}`, "error");
-    }
-  });
-  stopPaginationButton.addEventListener("click", () => {
-    stopPaginatedCollection();
-    setMessage("正在停止分页采集，当前已采集数据会保留。", "success");
-  });
+  toggleExportsButton.addEventListener("click", () => { exportOptions.hidden = !exportOptions.hidden; });
   downloadCollectionCsvButton.addEventListener("click", () => {
     try {
       downloadCollectionResult("csv");
@@ -1629,10 +1536,9 @@ function installPanel() {
     host.remove();
     delete window.__crawlHubPanelHost;
     delete window.__crawlHubSamplingChanged;
-    delete window.__crawlHubPaginationChanged;
   });
   setMode(window.__crawlHubMode || "analysis");
   return { started: true, already_open: false };
 }
 
-window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, findNextPageControl, startPaginatedCollection, stopPaginatedCollection, collectionCsv, collectionXlsx, downloadCollectionResult, saveCollectionTemplate, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
+window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, collectCurrentPage, collectionCsv, collectionXlsx, downloadCollectionResult, saveCollectionTemplate, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
