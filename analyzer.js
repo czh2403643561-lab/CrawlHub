@@ -333,7 +333,10 @@ function collectPageData() {
     { key: "click_count", label: "点击次数", aliases: ["点击次数", "点击量", "click count", "clicks"], kind: "metric" },
     { key: "click_rate", label: "点击率", aliases: ["点击率", "ctr", "click through rate", "click-through rate"], kind: "percentage" },
     { key: "shop", label: "店铺", aliases: ["店铺名称", "店铺", "shop name", "shop", "store", "seller"], kind: "text" },
-    { key: "similar_product_count", label: "同款商品数", aliases: ["同款商品数", "同款数", "similar product count", "similar products", "similar items"], kind: "metric" }
+    { key: "similar_product_count", label: "同款商品数", aliases: ["同款商品数", "同款数", "similar product count", "similar products", "similar items"], kind: "metric" },
+    { key: "price_range", label: "价格范围", aliases: ["价格范围", "价格", "price range", "price"], kind: "text" },
+    { key: "rating", label: "商品评分", aliases: ["商品评分", "评分", "rating", "score"], kind: "number" },
+    { key: "review_count", label: "评价数量", aliases: ["评价数量", "评价数", "review count", "review number", "reviews"], kind: "number" }
   ];
   const headerScore = (header, aliases) => {
     const normalized = normalizeHeader(header);
@@ -351,7 +354,29 @@ function collectPageData() {
   };
   const cellDetails = (row) => Array.from(row.children)
     .filter((cell) => ["td", "th"].includes(cell.tagName.toLowerCase()))
-    .map((cell) => ({ text: compactText(cell.innerText || cell.textContent || ""), image: imageSource(cell) }));
+    .map((cell) => ({ text: compactText(cell.innerText || cell.textContent || "", 2000), image: imageSource(cell) }));
+  const parseCount = (value) => {
+    const text = String(value || "").replace(/,/g, "").trim();
+    const match = text.match(/^([\d.]+)\s*([万kK])?\+?$/);
+    if (!match) return text || null;
+    const multiplier = match[2] === "万" ? 10000 : ["k", "K"].includes(match[2]) ? 1000 : 1;
+    return Number(match[1]) * multiplier;
+  };
+  const parseProductDetails = (value) => {
+    const text = String(value || "").replace(/\s+/g, " ").trim();
+    const priceMatch = text.match(/(?:价格范围|价格|price range)\s*[:：]\s*(.*?)(?=\s*(?:商品评分|评分|rating)\s*[:：]|$)/i);
+    const ratingMatch = text.match(/(?:商品评分|评分|rating)\s*[:：]\s*([\d.]+)\s*\/\s*5/i);
+    const reviewMatch = text.match(/\(\s*([\d,.]+\s*[万kK]?\+?)\s*(?:条)?\s*(?:评价|reviews?)\s*\)/i)
+      || text.match(/([\d,.]+\s*[万kK]?\+?)\s*(?:条)?\s*(?:评价|reviews?)/i);
+    const priceMarker = text.search(/(?:价格范围|价格|price range)\s*[:：]/i);
+    return {
+      title: priceMarker >= 0 ? text.slice(0, priceMarker).trim() : text,
+      price_range: priceMatch ? priceMatch[1].trim() : null,
+      rating: ratingMatch ? Number(ratingMatch[1]) : null,
+      review_count: reviewMatch ? parseCount(reviewMatch[1]) : null,
+      has_embedded_details: Boolean(priceMatch || ratingMatch || reviewMatch)
+    };
+  };
   const tableCandidates = Array.from(document.querySelectorAll("table"))
     .filter(isVisible)
     .map((table) => {
@@ -373,12 +398,22 @@ function collectPageData() {
     const imageColumn = columns
       .map((column) => ({ ...column, image_count: dataRows.slice(0, 8).filter((row) => Boolean(imageSource(row.children[column.index]))).length }))
       .sort((left, right) => right.image_count - left.image_count)[0];
+    const productColumn = columns
+      .map((column) => ({ ...column, score: headerScore(column.header, fieldDefinitions[0].aliases) }))
+      .sort((left, right) => right.score - left.score)[0];
+    const embeddedProductDetails = productColumn?.score
+      ? dataRows.slice(0, 8).map((row) => parseProductDetails(cellDetails(row)[productColumn.index]?.text || ""))
+      : [];
+    const hasEmbeddedProductDetails = embeddedProductDetails.some((details) => details.has_embedded_details);
     const fieldTemplate = fieldDefinitions.map((field) => {
       let best = columns
         .map((column) => ({ ...column, score: headerScore(column.header, field.aliases) }))
         .sort((left, right) => right.score - left.score)[0];
       if (field.key === "image" && (!best || best.score === 0) && imageColumn?.image_count) {
         best = { ...imageColumn, score: 1 };
+      }
+      if (["price_range", "rating", "review_count"].includes(field.key) && (!best || best.score === 0) && productColumn?.score && hasEmbeddedProductDetails) {
+        best = { ...productColumn, score: 1 };
       }
       return {
         key: field.key,
@@ -387,14 +422,22 @@ function collectPageData() {
         source_header: best?.score ? best.header : null,
         column_index: best?.score ? best.index : null,
         available: Boolean(best?.score),
-        match_confidence: best?.score >= 100 ? "high" : best?.score ? "low" : "unmatched"
+        match_confidence: best?.score >= 100 ? "high" : best?.score ? "low" : "unmatched",
+        extraction: ["price_range", "rating", "review_count"].includes(field.key) && best?.index === productColumn?.index && best?.score < 100 ? "embedded_product_text" : "cell_value"
       };
     });
     const records = dataRows.map((row) => {
       const cells = cellDetails(row);
+      const productDetails = productColumn?.score ? parseProductDetails(cells[productColumn.index]?.text || "") : null;
       return Object.fromEntries(fieldTemplate
         .filter((field) => field.available)
-        .map((field) => [field.label, field.key === "image" ? (cells[field.column_index]?.image || null) : (cells[field.column_index]?.text || "")]));
+        .map((field) => {
+          if (productDetails && field.key === "product_name" && field.column_index === productColumn.index) return [field.label, productDetails.title];
+          if (productDetails && field.key === "price_range" && field.column_index === productColumn.index && field.extraction === "embedded_product_text") return [field.label, productDetails.price_range];
+          if (productDetails && field.key === "rating" && field.column_index === productColumn.index && field.extraction === "embedded_product_text") return [field.label, productDetails.rating];
+          if (productDetails && field.key === "review_count" && field.column_index === productColumn.index && field.extraction === "embedded_product_text") return [field.label, productDetails.review_count];
+          return [field.label, field.key === "image" ? (cells[field.column_index]?.image || null) : (cells[field.column_index]?.text || "")];
+        }));
     });
     return {
       schema_version: "1.0",
