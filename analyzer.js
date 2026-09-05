@@ -327,16 +327,17 @@ function collectPageData() {
   };
   const normalizeHeader = (value) => String(value || "").toLowerCase().replace(/[\s_\-:/：()（）]/g, "");
   const fieldDefinitions = [
+    { key: "rank", label: "排名", aliases: ["排名", "rank", "ranking", "position", "序号"], kind: "number" },
     { key: "product_name", label: "商品名称", aliases: ["商品名称", "商品", "产品名称", "产品", "product name", "product", "title", "名称"], kind: "text" },
     { key: "image", label: "图片", aliases: ["图片", "商品图片", "image", "product image", "thumbnail", "cover"], kind: "image" },
+    { key: "price_range", label: "价格范围", aliases: ["价格范围", "价格", "price range", "price"], kind: "text" },
+    { key: "rating", label: "商品评分", aliases: ["商品评分", "评分", "rating", "score"], kind: "number" },
+    { key: "review_count", label: "评价数量", aliases: ["评价数量", "评价数", "review count", "review number", "reviews"], kind: "number" },
     { key: "gmv", label: "GMV", aliases: ["gmv", "成交额", "交易额", "gross merchandise value"], kind: "metric" },
     { key: "click_count", label: "点击次数", aliases: ["点击次数", "点击量", "click count", "clicks"], kind: "metric" },
     { key: "click_rate", label: "点击率", aliases: ["点击率", "ctr", "click through rate", "click-through rate"], kind: "percentage" },
     { key: "shop", label: "店铺", aliases: ["店铺名称", "店铺", "shop name", "shop", "store", "seller"], kind: "text" },
-    { key: "similar_product_count", label: "同款商品数", aliases: ["同款商品数", "同款数", "similar product count", "similar products", "similar items"], kind: "metric" },
-    { key: "price_range", label: "价格范围", aliases: ["价格范围", "价格", "price range", "price"], kind: "text" },
-    { key: "rating", label: "商品评分", aliases: ["商品评分", "评分", "rating", "score"], kind: "number" },
-    { key: "review_count", label: "评价数量", aliases: ["评价数量", "评价数", "review count", "review number", "reviews"], kind: "number" }
+    { key: "similar_product_count", label: "同款商品数", aliases: ["同款商品数", "同款数", "similar product count", "similar products", "similar items"], kind: "metric" }
   ];
   const headerScore = (header, aliases) => {
     const normalized = normalizeHeader(header);
@@ -350,7 +351,15 @@ function collectPageData() {
   };
   const imageSource = (cell) => {
     const image = cell?.querySelector("img");
-    return image ? (image.currentSrc || image.src || null) : null;
+    if (!image) return null;
+    const candidates = [image.getAttribute("src"), image.getAttribute("data-src"), image.currentSrc, image.src]
+      .filter((value) => value && !String(value).startsWith("data:"));
+    if (!candidates.length) return null;
+    try {
+      return new URL(candidates[0], location.href).href;
+    } catch {
+      return candidates[0];
+    }
   };
   const cellDetails = (row) => Array.from(row.children)
     .filter((cell) => ["td", "th"].includes(cell.tagName.toLowerCase()))
@@ -361,6 +370,10 @@ function collectPageData() {
     if (!match) return text || null;
     const multiplier = match[2] === "万" ? 10000 : ["k", "K"].includes(match[2]) ? 1000 : 1;
     return Number(match[1]) * multiplier;
+  };
+  const parseRank = (value) => {
+    const match = String(value || "").match(/\d+/);
+    return match ? Number(match[0]) : null;
   };
   const parseProductDetails = (value) => {
     const text = String(value || "").replace(/\s+/g, " ").trim();
@@ -399,7 +412,7 @@ function collectPageData() {
       .map((column) => ({ ...column, image_count: dataRows.slice(0, 8).filter((row) => Boolean(imageSource(row.children[column.index]))).length }))
       .sort((left, right) => right.image_count - left.image_count)[0];
     const productColumn = columns
-      .map((column) => ({ ...column, score: headerScore(column.header, fieldDefinitions[0].aliases) }))
+      .map((column) => ({ ...column, score: headerScore(column.header, fieldDefinitions.find((field) => field.key === "product_name").aliases) }))
       .sort((left, right) => right.score - left.score)[0];
     const embeddedProductDetails = productColumn?.score
       ? dataRows.slice(0, 8).map((row) => parseProductDetails(cellDetails(row)[productColumn.index]?.text || ""))
@@ -436,6 +449,7 @@ function collectPageData() {
           if (productDetails && field.key === "price_range" && field.column_index === productColumn.index && field.extraction === "embedded_product_text") return [field.label, productDetails.price_range];
           if (productDetails && field.key === "rating" && field.column_index === productColumn.index && field.extraction === "embedded_product_text") return [field.label, productDetails.rating];
           if (productDetails && field.key === "review_count" && field.column_index === productColumn.index && field.extraction === "embedded_product_text") return [field.label, productDetails.review_count];
+          if (field.key === "rank") return [field.label, parseRank(cells[field.column_index]?.text || "")];
           return [field.label, field.key === "image" ? (cells[field.column_index]?.image || null) : (cells[field.column_index]?.text || "")];
         }));
     });
@@ -520,11 +534,121 @@ function collectionCsv(result) {
   ].join("\r\n");
 }
 
+function collectionXlsx(result) {
+  const fields = result.field_template.filter((field) => field.available && result.records.some((record) => Object.prototype.hasOwnProperty.call(record, field.label)));
+  if (!fields.length) throw new Error("没有可导出的字段");
+
+  const escapeXml = (value) => String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+  const columnName = (index) => {
+    let value = index + 1;
+    let name = "";
+    while (value) {
+      const remainder = (value - 1) % 26;
+      name = String.fromCharCode(65 + remainder) + name;
+      value = Math.floor((value - 1) / 26);
+    }
+    return name;
+  };
+  const textEncoder = new TextEncoder();
+  const crc32 = (bytes) => {
+    let crc = 0xffffffff;
+    for (const byte of bytes) {
+      crc ^= byte;
+      for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+    return (crc ^ 0xffffffff) >>> 0;
+  };
+  const zip = (entries) => {
+    const localParts = [];
+    const centralParts = [];
+    let offset = 0;
+    for (const entry of entries) {
+      const name = textEncoder.encode(entry.name);
+      const data = typeof entry.content === "string" ? textEncoder.encode(entry.content) : entry.content;
+      const crc = crc32(data);
+      const local = new Uint8Array(30 + name.length + data.length);
+      const localView = new DataView(local.buffer);
+      localView.setUint32(0, 0x04034b50, true);
+      localView.setUint16(4, 20, true);
+      localView.setUint32(14, crc, true);
+      localView.setUint32(18, data.length, true);
+      localView.setUint32(22, data.length, true);
+      localView.setUint16(26, name.length, true);
+      local.set(name, 30);
+      local.set(data, 30 + name.length);
+      localParts.push(local);
+
+      const central = new Uint8Array(46 + name.length);
+      const centralView = new DataView(central.buffer);
+      centralView.setUint32(0, 0x02014b50, true);
+      centralView.setUint16(4, 20, true);
+      centralView.setUint16(6, 20, true);
+      centralView.setUint32(16, crc, true);
+      centralView.setUint32(20, data.length, true);
+      centralView.setUint32(24, data.length, true);
+      centralView.setUint16(28, name.length, true);
+      centralView.setUint32(42, offset, true);
+      central.set(name, 46);
+      centralParts.push(central);
+      offset += local.length;
+    }
+    const centralLength = centralParts.reduce((total, part) => total + part.length, 0);
+    const end = new Uint8Array(22);
+    const endView = new DataView(end.buffer);
+    endView.setUint32(0, 0x06054b50, true);
+    endView.setUint16(8, entries.length, true);
+    endView.setUint16(10, entries.length, true);
+    endView.setUint32(12, centralLength, true);
+    endView.setUint32(16, offset, true);
+    const archive = new Uint8Array(offset + centralLength + end.length);
+    let cursor = 0;
+    for (const part of [...localParts, ...centralParts, end]) {
+      archive.set(part, cursor);
+      cursor += part.length;
+    }
+    return archive;
+  };
+  const rows = [fields.map((field) => field.label), ...result.records.map((record) => fields.map((field) => record[field.label] ?? ""))];
+  const columns = fields.map((field, index) => {
+    const longest = Math.max(...rows.map((row) => String(row[index] ?? "").length));
+    return `<col min="${index + 1}" max="${index + 1}" width="${Math.min(48, Math.max(10, longest + 2))}" customWidth="1"/>`;
+  }).join("");
+  const rowXml = rows.map((row, rowIndex) => {
+    const cells = row.map((value, columnIndex) => {
+      const reference = `${columnName(columnIndex)}${rowIndex + 1}`;
+      if (typeof value === "number" && Number.isFinite(value)) return `<c r="${reference}" s="${rowIndex === 0 ? 1 : 0}"><v>${value}</v></c>`;
+      const text = escapeXml(value);
+      const preserve = /^\s|\s$/.test(String(value ?? "")) ? ' xml:space="preserve"' : "";
+      return `<c r="${reference}" t="inlineStr" s="${rowIndex === 0 ? 1 : 0}"><is><t${preserve}>${text}</t></is></c>`;
+    }).join("");
+    return `<row r="${rowIndex + 1}"${rowIndex === 0 ? ' ht="24" customHeight="1"' : ""}>${cells}</row>`;
+  }).join("");
+  const sheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="18"/><cols>${columns}</cols><sheetData>${rowXml}</sheetData></worksheet>`;
+  const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="10"/><name val="Arial"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="10"/><name val="Arial"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF315EFB"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" applyAlignment="1"><alignment vertical="top" wrapText="1"/></xf><xf numFmtId="0" fontId="1" fillId="1" borderId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf></cellXfs></styleSheet>`;
+  return zip([
+    { name: "[Content_Types].xml", content: "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/><Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/></Types>" },
+    { name: "_rels/.rels", content: "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>" },
+    { name: "xl/workbook.xml", content: "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"采集结果\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>" },
+    { name: "xl/_rels/workbook.xml.rels", content: "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/></Relationships>" },
+    { name: "xl/styles.xml", content: stylesXml },
+    { name: "xl/worksheets/sheet1.xml", content: sheetXml }
+  ]);
+}
+
 function downloadCollectionResult(format) {
   const result = window.__crawlHubCollectionPreview;
   if (!result) throw new Error("请先提取当前页列表数据");
   if (format === "csv") {
     downloadCollectionFile("collection.csv", `\uFEFF${collectionCsv(result)}`, "text/csv;charset=utf-8");
+    return;
+  }
+  if (format === "xlsx") {
+    downloadCollectionFile("collection.xlsx", collectionXlsx(result), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     return;
   }
   downloadCollectionFile("collection.json", JSON.stringify(result, null, 2), "application/json;charset=utf-8");
@@ -1087,6 +1211,7 @@ function installPanel() {
             <button id="extractCollection">提取当前页列表</button>
             <button id="downloadCollectionCsv" class="secondary">导出 CSV</button>
             <button id="downloadCollectionJson" class="secondary">导出 JSON</button>
+            <button id="downloadCollectionXlsx" class="secondary">导出 Excel</button>
             <button id="saveCollectionTemplate" class="secondary">保存字段模板</button>
             <button id="backToAnalysis" class="secondary">返回页面分析</button>
           </div>
@@ -1109,6 +1234,7 @@ function installPanel() {
   const extractCollectionButton = shadow.querySelector("#extractCollection");
   const downloadCollectionCsvButton = shadow.querySelector("#downloadCollectionCsv");
   const downloadCollectionJsonButton = shadow.querySelector("#downloadCollectionJson");
+  const downloadCollectionXlsxButton = shadow.querySelector("#downloadCollectionXlsx");
   const saveCollectionTemplateButton = shadow.querySelector("#saveCollectionTemplate");
   const stateText = shadow.querySelector("#state");
   const countText = shadow.querySelector("#count");
@@ -1169,6 +1295,7 @@ function installPanel() {
     }
     downloadCollectionCsvButton.disabled = !result.records.length;
     downloadCollectionJsonButton.disabled = !result.records.length;
+    downloadCollectionXlsxButton.disabled = !result.records.length;
     saveCollectionTemplateButton.disabled = !result.field_template.length;
   };
   const setMode = (mode) => {
@@ -1242,6 +1369,14 @@ function installPanel() {
       setMessage(`JSON 导出失败：${error.message || "无法导出"}`, "error");
     }
   });
+  downloadCollectionXlsxButton.addEventListener("click", () => {
+    try {
+      downloadCollectionResult("xlsx");
+      setMessage("collection.xlsx 已下载。", "success");
+    } catch (error) {
+      setMessage(`Excel 导出失败：${error.message || "无法导出"}`, "error");
+    }
+  });
   saveCollectionTemplateButton.addEventListener("click", () => {
     try {
       saveCollectionTemplate();
@@ -1287,4 +1422,4 @@ function installPanel() {
   return { started: true, already_open: false };
 }
 
-window.__crawlHub = { analyzePage, collectPageData, collectionCsv, downloadCollectionResult, saveCollectionTemplate, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
+window.__crawlHub = { analyzePage, collectPageData, collectionCsv, collectionXlsx, downloadCollectionResult, saveCollectionTemplate, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
