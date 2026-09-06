@@ -2,6 +2,7 @@
 
 const storageRequestEvent = "crawlHub:storage-request";
 const storageResponseEvent = "crawlHub:storage-response";
+const reconnectSessionKey = "crawlHub.reconnect.pending";
 
 function isExtensionContextError(error) {
   return /extension context invalidated|receiving end does not exist|message port closed/i.test(String(error?.message || error || ""));
@@ -40,5 +41,17 @@ const storageBridgeHandler = async (event) => {
 document.addEventListener(storageRequestEvent, storageBridgeHandler);
 globalThis.__crawlHubStorageBridgeHandler = storageBridgeHandler;
 globalThis.__crawlHubStorageBridgeInstalled = true;
+
+function injectReconnectPanel() {
+  if (sessionStorage.getItem(reconnectSessionKey) !== "1") return;
+  const script = document.createElement("script");
+  script.src = globalThis.chrome.runtime.getURL("analyzer.js");
+  script.dataset.crawlHubReconnect = "true";
+  script.onload = () => script.remove();
+  (document.head || document.documentElement).appendChild(script);
+}
+
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", injectReconnectPanel, { once: true });
+else injectReconnectPanel();
 
 })();

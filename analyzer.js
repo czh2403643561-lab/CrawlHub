@@ -644,6 +644,7 @@ function clearCollectionData() {
   delete window.__crawlHubManualCollectionState;
   delete window.__crawlHubCollectionEnvironment;
   delete window.__crawlHubPaginationState;
+  try { sessionStorage.removeItem("crawlHub.collection.session.v1"); } catch { }
   return { cleared: true };
 }
 
@@ -693,6 +694,9 @@ async function collectCurrentPage() {
   };
   const savedProject = await saveInternalProject(merged);
   merged.project_id = savedProject.project_id;
+  try {
+    sessionStorage.setItem("crawlHub.collection.session.v1", JSON.stringify({ url: location.href, pages, result: merged }));
+  } catch { }
   window.__crawlHubCollectionEnvironment = { ...environment, signature: JSON.stringify(environment) };
   window.__crawlHubCollectionFieldTemplate = result.field_template;
   window.__crawlHubCollectionRawColumns = result.raw_columns;
@@ -757,6 +761,28 @@ function collectionProjectData(result) {
   };
 }
 
+function restoreCollectionSession() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem("crawlHub.collection.session.v1") || "null");
+    if (!saved || saved.url !== location.href || !saved.result || !Array.isArray(saved.pages)) return false;
+    window.__crawlHubManualCollectionPages = saved.pages;
+    window.__crawlHubCollectionPreview = saved.result;
+    window.__crawlHubCurrentProjectId = saved.result.project_id || window.__crawlHubCurrentProjectId;
+    window.__crawlHubCollectionFieldTemplate = saved.result.field_template || [];
+    window.__crawlHubCollectionRawColumns = saved.result.raw_columns || [];
+    window.__crawlHubCollectionSourceType = saved.result.source_type || null;
+    window.__crawlHubManualCollectionState = {
+      last_page: saved.result.pagination?.current_page || null,
+      collected_pages: saved.result.pagination?.collected_pages || saved.pages.length,
+      collected_items: saved.result.item_count || saved.result.records.length,
+      duplicate: false
+    };
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function projectStorageRequest(type, payload = {}) {
   return new Promise((resolve, reject) => {
     const recoveryMessage = "扩展刚刚重载，请点击浏览器工具栏中的 CrawlHub 图标重新打开面板后重试。字段模板会保留。";
@@ -782,6 +808,15 @@ function projectStorageRequest(type, payload = {}) {
       detail: { request_id: requestId, type, ...payload }
     }));
   });
+}
+
+async function checkExtensionConnection() {
+  await projectStorageRequest("crawlHub:ping");
+  return true;
+}
+
+function markReconnectPending() {
+  try { sessionStorage.setItem("crawlHub.reconnect.pending", "1"); } catch { }
 }
 
 async function saveInternalProject(result) {
@@ -1557,7 +1592,7 @@ function stopElementSampling() {
 }
 
 function installPanel() {
-  const panelVersion = "collection-only-v2";
+  const panelVersion = "collection-only-v3";
   if (window.__crawlHubPanelHost) {
     if (window.__crawlHubPanelHost.dataset.crawlHubPanelVersion !== panelVersion) {
       stopElementSampling();
@@ -1593,6 +1628,7 @@ function installPanel() {
       header strong { flex: 1; font-size: 14px; }
       header button { width: 24px; height: 24px; border: 0; border-radius: 5px; color: #fff; background: rgba(255,255,255,.18); cursor: pointer; font-size: 16px; line-height: 20px; }
       header button.settings { font-size: 14px; }
+      header button.reconnect { font-size: 15px; }
       .content { padding: 12px; }
       .hint { margin-bottom: 10px; color: #667085; font-size: 12px; }
       .state { margin-bottom: 8px; font-weight: 600; }
@@ -1634,7 +1670,7 @@ function installPanel() {
       .view[hidden], .content[hidden] { display: none; }
     </style>
     <div class="panel">
-      <header><strong>CrawlHub 页面分析</strong><button id="exportSettings" class="settings" title="设置默认导出目录">⚙</button><button id="minimize" title="最小化">−</button><button id="close" title="关闭">×</button></header>
+      <header><strong>CrawlHub 页面分析</strong><button id="exportSettings" class="settings" title="设置默认导出目录">⚙</button><button id="reconnectPage" class="reconnect" title="重新连接页面">↻</button><button id="minimize" title="最小化">−</button><button id="close" title="关闭">×</button></header>
       <div id="content" class="content">
         <div class="hint">数据仅在本地处理，不记录响应内容。</div>
         <div class="mode-switch" role="tablist" aria-label="工作模式">
@@ -1682,6 +1718,7 @@ function installPanel() {
 
   const content = shadow.querySelector("#content");
   const exportSettingsButton = shadow.querySelector("#exportSettings");
+  const reconnectPageButton = shadow.querySelector("#reconnectPage");
   const analysisView = shadow.querySelector("#analysisView");
   const collectionView = shadow.querySelector("#collectionView");
   const analysisModeButton = shadow.querySelector("#analysisMode");
@@ -1761,7 +1798,7 @@ function installPanel() {
       clearCollectionDataButton.disabled = true;
       return;
     }
-    const sourceLabel = result.source_type === "table" ? "表格" : result.source_type === "list" ? "列表" : result.source_type === "paginated_table" || result.source_type === "manual_paginated_table" ? "分页表格" : "未找到可提取的表格或列表";
+    const sourceLabel = result.source_type === "table" ? "表格" : result.source_type === "list" ? "列表" : result.source_type === "paginated_table" || result.source_type === "manual_paginated_table" ? "分页表格" : result.source_type === "restored_session" ? "已恢复项目" : "未找到可提取的表格或列表";
     collectionState.textContent = manualState?.last_page
       ? `✓ 第${manualState.last_page}页完成 · 已采集${result.item_count}条 · 已保存到本地项目${manualState.duplicate ? "（本页已采集，未重复计数）" : ""}`
       : `${sourceLabel} · 当前页商品/条目数量：${result.item_count}`;
@@ -1807,6 +1844,20 @@ function installPanel() {
     saveCollectionTemplateButton.disabled = !result.field_template.length;
     clearCollectionDataButton.disabled = false;
   };
+  const reconnectPage = async () => {
+    setMessage("正在检查页面连接…");
+    try {
+      await checkExtensionConnection();
+      setMessage("页面连接成功，可以继续采集", "success");
+      return true;
+    } catch {
+      markReconnectPending();
+      setMessage("检测到插件更新，正在重新连接当前页面…", "success");
+      if (typeof window.location?.reload === "function") setTimeout(() => window.location.reload(), 60);
+      return false;
+    }
+  };
+  window.__crawlHubCollectionRender = renderCollection;
   const setMode = (mode) => {
     window.__crawlHubMode = mode;
     const isAnalysis = mode === "analysis";
@@ -1874,8 +1925,16 @@ function installPanel() {
       setMessage(`设置导出目录失败：${error.message || "无法保存设置"}`, "error");
     }
   });
+  reconnectPageButton.addEventListener("click", reconnectPage);
   collectCollectionButton.addEventListener("click", async () => {
     try {
+      setMessage("正在检查页面连接…");
+      try {
+        await checkExtensionConnection();
+      } catch {
+        await reconnectPage();
+        return;
+      }
       setMessage("采集中…");
       collectCollectionButton.disabled = true;
       const collected = await collectCurrentPage();
@@ -1966,11 +2025,20 @@ function installPanel() {
     host.remove();
     delete window.__crawlHubPanelHost;
     delete window.__crawlHubSamplingChanged;
+    delete window.__crawlHubCollectionRender;
   });
   setMode(window.__crawlHubMode || "analysis");
   return { started: true, already_open: false };
 }
 
 window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, collectCurrentPage, clearCollectionData, collectionCsv, collectionXlsx, collectionProjectData, exportCollectionProject, saveCollectionTemplate, startNetworkObserver, startElementSampling, pauseElementSampling, resumeElementSampling, cancelElementSampling, stopElementSampling, installPanel };
+
+restoreCollectionSession();
+try {
+  if (sessionStorage.getItem("crawlHub.reconnect.pending") === "1") {
+    sessionStorage.removeItem("crawlHub.reconnect.pending");
+    setTimeout(() => window.__crawlHub.installPanel(), 0);
+  }
+} catch { }
 
 })();

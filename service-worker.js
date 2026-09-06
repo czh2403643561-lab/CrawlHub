@@ -9,6 +9,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message?.type?.startsWith("crawlHub:")) return undefined;
 
   (async () => {
+    if (message.type === "crawlHub:ping") return { connected: true };
     const projects = await readProjects();
     if (message.type === "crawlHub:save-project") {
       const projectId = String(message.project_id || "");
