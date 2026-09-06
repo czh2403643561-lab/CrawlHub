@@ -759,17 +759,22 @@ function collectionProjectData(result) {
 
 function projectStorageRequest(type, payload = {}) {
   return new Promise((resolve, reject) => {
+    const recoveryMessage = "扩展刚刚重载，请点击浏览器工具栏中的 CrawlHub 图标重新打开面板后重试。字段模板会保留。";
+    const isContextInvalidated = (value) => /extension context invalidated|receiving end does not exist|message port closed/i.test(String(value || ""));
     const requestId = `crawlHub-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const timeout = setTimeout(() => {
       document.removeEventListener("crawlHub:storage-response", onResponse);
-      reject(new Error("本地项目数据服务未连接，请重新打开插件面板后再试"));
+      reject(new Error("本地项目数据连接已失效，请点击浏览器工具栏中的 CrawlHub 图标重新打开面板后重试。"));
     }, 3000);
     const onResponse = (event) => {
       const response = event.detail;
       if (response?.request_id !== requestId) return;
       clearTimeout(timeout);
       document.removeEventListener("crawlHub:storage-response", onResponse);
-      if (!response.ok) reject(new Error(response.error || "本地项目数据操作失败"));
+      if (!response.ok) {
+        const error = response.error || "本地项目数据操作失败";
+        reject(new Error(response.error_code === "extension_context_invalidated" || isContextInvalidated(error) ? recoveryMessage : error));
+      }
       else resolve(response);
     };
     document.addEventListener("crawlHub:storage-response", onResponse);
@@ -1452,7 +1457,7 @@ function stopElementSampling() {
 }
 
 function installPanel() {
-  const panelVersion = "collection-only-v1";
+  const panelVersion = "collection-only-v2";
   if (window.__crawlHubPanelHost) {
     if (window.__crawlHubPanelHost.dataset.crawlHubPanelVersion !== panelVersion) {
       stopElementSampling();
