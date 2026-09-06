@@ -903,6 +903,96 @@ async function writeProjectFile(directory, filename, content) {
   await writable.close();
 }
 
+function collectionCsv(products, fields = projectProductFields) {
+  const escapeCsv = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+  const rows = [fields.map((field) => escapeCsv(field.label)).join(",")];
+  products.forEach((product) => rows.push(fields.map((field) => escapeCsv(product[field.key])).join(",")));
+  return `\uFEFF${rows.join("\r\n")}\r\n`;
+}
+
+const exportSettingsDatabase = "crawlHub.export-settings.v1";
+const exportSettingsStore = "settings";
+const exportRootSettingKey = "default_root";
+
+function openExportSettingsDatabase() {
+  if (!window.indexedDB) throw new Error("当前页面不支持保存导出目录设置。");
+  return new Promise((resolve, reject) => {
+    const request = window.indexedDB.open(exportSettingsDatabase, 1);
+    request.onupgradeneeded = () => request.result.createObjectStore(exportSettingsStore, { keyPath: "key" });
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("导出目录设置无法保存。"));
+  });
+}
+
+async function readExportRootDirectory() {
+  if (window.__crawlHubExportRootDirectory) return window.__crawlHubExportRootDirectory;
+  const database = await openExportSettingsDatabase();
+  return new Promise((resolve, reject) => {
+    const request = database.transaction(exportSettingsStore, "readonly").objectStore(exportSettingsStore).get(exportRootSettingKey);
+    request.onsuccess = () => {
+      database.close();
+      const handle = request.result?.handle || null;
+      window.__crawlHubExportRootDirectory = handle;
+      resolve(handle);
+    };
+    request.onerror = () => {
+      database.close();
+      reject(request.error || new Error("导出目录设置无法读取。"));
+    };
+  });
+}
+
+async function saveExportRootDirectory(handle) {
+  const database = await openExportSettingsDatabase();
+  return new Promise((resolve, reject) => {
+    const request = database.transaction(exportSettingsStore, "readwrite").objectStore(exportSettingsStore).put({ key: exportRootSettingKey, handle });
+    request.onsuccess = () => {
+      database.close();
+      window.__crawlHubExportRootDirectory = handle;
+      resolve(handle);
+    };
+    request.onerror = () => {
+      database.close();
+      reject(request.error || new Error("导出目录设置无法保存。"));
+    };
+  });
+}
+
+async function ensureExportRootPermission(handle) {
+  if (!handle || typeof handle.queryPermission !== "function") return Boolean(handle);
+  const permission = await handle.queryPermission({ mode: "readwrite" });
+  if (permission === "granted") return true;
+  return (await handle.requestPermission({ mode: "readwrite" })) === "granted";
+}
+
+function exportDirectoryName(value) {
+  const cleaned = String(value || "")
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[. ]+$/g, "")
+    .slice(0, 80);
+  return cleaned || "未识别";
+}
+
+function categoryDirectoryName(metadata) {
+  return exportDirectoryName(metadata.category_short || metadata.category_full || "未识别");
+}
+
+function rankingDirectoryName(metadata) {
+  const supportedRankTypes = ["总榜", "直播榜", "短视频榜", "商品卡", "达人榜", "新品榜"];
+  return exportDirectoryName(supportedRankTypes.includes(metadata.rank_type) ? metadata.rank_type : "未识别");
+}
+
+async function findDirectory(parent, name) {
+  try {
+    return await parent.getDirectoryHandle(name, { create: false });
+  } catch (error) {
+    if (error?.name === "NotFoundError") return null;
+    throw error;
+  }
+}
+
 function projectFolderName(metadata) {
   const shortName = String(metadata.category_short || "未识别").replace(/[\\/:*?"<>|]/g, "_").replace(/\s+/g, " ").trim() || "未识别";
   const createdAt = new Date(metadata.created_at);
@@ -919,13 +1009,23 @@ async function exportCollectionProject() {
   const stored = await projectStorageRequest("crawlHub:read-project", { project_id: projectId });
   const project = stored.project;
   if (!project) throw new Error("未找到已保存的项目数据，请重新采集当前页");
-  const parentDirectory = await window.showDirectoryPicker({ mode: "readwrite" });
-  const projectDirectory = await parentDirectory.getDirectoryHandle("CrawlHub项目", { create: true });
-  const collectionDirectory = await projectDirectory.getDirectoryHandle(projectFolderName(project.metadata), { create: true });
+  const rootDirectory = await readExportRootDirectory();
+  if (!rootDirectory) throw new Error("尚未设置默认导出根目录，请先点击齿轮设置；设置后可通过设置入口修改。");
+  if (!(await ensureExportRootPermission(rootDirectory))) throw new Error("默认导出目录权限已失效，请点击齿轮重新设置。");
+  const categoryDirectory = await rootDirectory.getDirectoryHandle(categoryDirectoryName(project.metadata), { create: true });
+  const rankDirectoryName = rankingDirectoryName(project.metadata);
+  let collectionDirectory = await findDirectory(categoryDirectory, rankDirectoryName);
+  if (collectionDirectory) {
+    const confirmed = window.confirm(`发现已有数据：${categoryDirectory.name} / ${collectionDirectory.name}\n是否覆盖该榜单目录中的文件？`);
+    if (!confirmed) throw new Error("已取消覆盖，原有数据未修改。");
+  } else {
+    collectionDirectory = await categoryDirectory.getDirectoryHandle(rankDirectoryName, { create: true });
+  }
   await writeProjectFile(collectionDirectory, "metadata.json", JSON.stringify(project.metadata, null, 2));
   await writeProjectFile(collectionDirectory, "products.json", JSON.stringify(project.products, null, 2));
   await writeProjectFile(collectionDirectory, "products.xlsx", collectionXlsx(project.products));
-  return { folder_name: collectionDirectory.name, product_count: project.products.length };
+  await writeProjectFile(collectionDirectory, "products.csv", collectionCsv(project.products));
+  return { folder_name: `${categoryDirectory.name}/${collectionDirectory.name}`, product_count: project.products.length };
 }
 
 function saveCollectionTemplate() {
@@ -1492,6 +1592,7 @@ function installPanel() {
       header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; color: #fff; background: #315efb; }
       header strong { flex: 1; font-size: 14px; }
       header button { width: 24px; height: 24px; border: 0; border-radius: 5px; color: #fff; background: rgba(255,255,255,.18); cursor: pointer; font-size: 16px; line-height: 20px; }
+      header button.settings { font-size: 14px; }
       .content { padding: 12px; }
       .hint { margin-bottom: 10px; color: #667085; font-size: 12px; }
       .state { margin-bottom: 8px; font-weight: 600; }
@@ -1533,7 +1634,7 @@ function installPanel() {
       .view[hidden], .content[hidden] { display: none; }
     </style>
     <div class="panel">
-      <header><strong>CrawlHub 页面分析</strong><button id="minimize" title="最小化">−</button><button id="close" title="关闭">×</button></header>
+      <header><strong>CrawlHub 页面分析</strong><button id="exportSettings" class="settings" title="设置默认导出目录">⚙</button><button id="minimize" title="最小化">−</button><button id="close" title="关闭">×</button></header>
       <div id="content" class="content">
         <div class="hint">数据仅在本地处理，不记录响应内容。</div>
         <div class="mode-switch" role="tablist" aria-label="工作模式">
@@ -1560,6 +1661,7 @@ function installPanel() {
             <p>根据表头和行列关系生成字段模板，提取当前已加载的表格或列表数据。</p>
             <div id="collectionState" class="collection-meta">尚未采集</div>
             <div id="metadataStatus" class="collection-meta">metadata：等待采样顶部类目标签</div>
+            <div id="exportRootStatus" class="collection-meta">默认导出目录：未设置（请点击齿轮设置）</div>
             <div id="paginationStatus" class="collection-meta">分页状态：未识别</div>
             <ul id="collectionFields" class="collection-fields"><li>字段模板：未生成</li></ul>
             <div id="collectionPreviewTable" class="collection-preview-table">点击“采集当前页”查看示例数据。</div>
@@ -1579,12 +1681,14 @@ function installPanel() {
   window.__crawlHubPanelHost = host;
 
   const content = shadow.querySelector("#content");
+  const exportSettingsButton = shadow.querySelector("#exportSettings");
   const analysisView = shadow.querySelector("#analysisView");
   const collectionView = shadow.querySelector("#collectionView");
   const analysisModeButton = shadow.querySelector("#analysisMode");
   const collectionModeButton = shadow.querySelector("#collectionMode");
   const collectionState = shadow.querySelector("#collectionState");
   const metadataStatus = shadow.querySelector("#metadataStatus");
+  const exportRootStatus = shadow.querySelector("#exportRootStatus");
   const paginationStatus = shadow.querySelector("#paginationStatus");
   const collectionFields = shadow.querySelector("#collectionFields");
   const collectionPreviewTable = shadow.querySelector("#collectionPreviewTable");
@@ -1609,6 +1713,14 @@ function installPanel() {
     message.textContent = text;
     message.className = `message ${kind}`.trim();
   };
+  const renderExportRootStatus = () => {
+    exportRootStatus.textContent = "默认导出目录：读取中…";
+    readExportRootDirectory().then((handle) => {
+      exportRootStatus.textContent = handle ? `默认导出目录：${handle.name}` : "默认导出目录：未设置（请点击齿轮设置）";
+    }).catch(() => {
+      exportRootStatus.textContent = "默认导出目录：设置读取失败（请点击齿轮重新设置）";
+    });
+  };
   const renderFieldTemplate = (fields) => {
     collectionFields.replaceChildren();
     if (!fields.length) {
@@ -1624,6 +1736,7 @@ function installPanel() {
     });
   };
   const renderCollection = () => {
+    renderExportRootStatus();
     const result = window.__crawlHubCollectionPreview;
     const manualState = window.__crawlHubManualCollectionState;
     const fieldTemplate = result?.field_template || window.__crawlHubCollectionFieldTemplate || [];
@@ -1746,6 +1859,21 @@ function installPanel() {
     setMode("collection");
     setMessage("可提取当前页已加载的数据；不会翻页或发送页面数据。", "success");
   });
+  exportSettingsButton.addEventListener("click", async () => {
+    try {
+      if (typeof window.showDirectoryPicker !== "function") throw new Error("当前浏览器不支持目录选择，请使用最新版 Chrome。");
+      const handle = await window.showDirectoryPicker({ mode: "readwrite" });
+      await saveExportRootDirectory(handle);
+      renderExportRootStatus();
+      setMessage(`默认导出目录已设置为“${handle.name}”，之后可通过齿轮修改。`, "success");
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        setMessage("已取消设置导出目录。", "success");
+        return;
+      }
+      setMessage(`设置导出目录失败：${error.message || "无法保存设置"}`, "error");
+    }
+  });
   collectCollectionButton.addEventListener("click", async () => {
     try {
       setMessage("采集中…");
@@ -1843,6 +1971,6 @@ function installPanel() {
   return { started: true, already_open: false };
 }
 
-window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, collectCurrentPage, clearCollectionData, collectionXlsx, collectionProjectData, exportCollectionProject, saveCollectionTemplate, startNetworkObserver, startElementSampling, pauseElementSampling, resumeElementSampling, cancelElementSampling, stopElementSampling, installPanel };
+window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, collectCurrentPage, clearCollectionData, collectionCsv, collectionXlsx, collectionProjectData, exportCollectionProject, saveCollectionTemplate, startNetworkObserver, startElementSampling, pauseElementSampling, resumeElementSampling, cancelElementSampling, stopElementSampling, installPanel };
 
 })();
