@@ -341,6 +341,7 @@ function collectPageData() {
     { key: "click_rate", label: "点击率", aliases: ["点击率", "ctr", "click through rate", "click-through rate"], kind: "percentage" },
     { key: "live_account", label: "直播账号", aliases: ["直播账号", "直播间账号", "live account", "live stream account"], kind: "text" },
     { key: "best_video", label: "表现最佳的视频", aliases: ["表现最佳的视频", "最佳视频", "top performing video", "best performing video", "best video"], kind: "text" },
+    { key: "videos", label: "视频", aliases: ["表现最佳的视频", "视频", "视频内容", "视频卡片", "videos"], kind: "object" },
     { key: "creator", label: "带货达人", aliases: ["带货达人", "达人账号", "creator", "influencer", "affiliate creator"], kind: "text" },
     { key: "shop", label: "店铺", aliases: ["店铺名称", "店铺", "shop name", "shop", "store", "seller"], kind: "text" },
     { key: "similar_product_count", label: "同款商品数", aliases: ["同款商品数", "同款数", "similar product count", "similar products", "similar items"], kind: "metric" }
@@ -554,9 +555,8 @@ function collectPageData() {
       result.videos = items
         .filter((item) => Boolean(item.cover))
         .map((item) => ({
-          cover_image: item.cover,
-          creator_name: item.creator || null,
-          visible_text: item.visible_text || ""
+          cover: item.cover,
+          creator: item.creator || null
         }));
     }
     return result;
@@ -585,6 +585,24 @@ function collectPageData() {
     const productColumn = columns
       .map((column) => ({ ...column, score: headerScore(column.header, fieldDefinitions.find((field) => field.key === "product_name").aliases) }))
       .sort((left, right) => right.score - left.score)[0];
+    const videoImage = (image) => {
+      let current = image?.parentElement || null;
+      let depth = 0;
+      while (current && depth < 5) {
+        if (/(?:VideoPlayBtn|video|play)/i.test(String(current.className || ""))) return true;
+        current = current.parentElement;
+        depth += 1;
+      }
+      return false;
+    };
+    const videoColumn = columns
+      .map((column) => ({
+        ...column,
+        video_image_count: dataRows.slice(0, 8).reduce((count, row) => count
+          + Array.from(row.children[column.index]?.querySelectorAll("img") || []).filter(videoImage).length, 0)
+      }))
+      .sort((left, right) => right.video_image_count - left.video_image_count)[0];
+    const hasVideoColumn = Boolean(videoColumn?.video_image_count);
     const embeddedProductDetails = productColumn?.score
       ? dataRows.slice(0, 8).map((row) => parseProductDetails(cellDetails(row)[productColumn.index]?.text || ""))
       : [];
@@ -598,6 +616,9 @@ function collectPageData() {
       }
       if (["price_range", "rating", "review_count"].includes(field.key) && (!best || best.score === 0) && productColumn?.score && hasEmbeddedProductDetails) {
         best = { ...productColumn, score: 1 };
+      }
+      if (field.key === "videos" && (!best || best.score === 0) && hasVideoColumn) {
+        best = { ...videoColumn, score: 1 };
       }
       if (field.key === "rank_change" && (!best || best.score === 0)) {
         const rankColumn = columns
@@ -618,7 +639,9 @@ function collectPageData() {
     });
     const rankColumnIndex = fieldTemplate.find((field) => field.key === "rank" && field.available)?.column_index;
     const relatedColumnIndexes = {
-      video: fieldTemplate.find((field) => field.key === "best_video" && field.available)?.column_index,
+        video: fieldTemplate.find((field) => field.key === "videos" && field.available)?.column_index
+          ?? fieldTemplate.find((field) => field.key === "best_video" && field.available)?.column_index
+          ?? (hasVideoColumn ? videoColumn.index : undefined),
       creator: fieldTemplate.find((field) => field.key === "creator" && field.available)?.column_index
     };
     const records = dataRows.map((row, rowIndex) => {
@@ -634,6 +657,7 @@ function collectPageData() {
           if (productDetails && field.key === "review_count" && field.column_index === productColumn.index && field.extraction === "embedded_product_text") return [field.label, productDetails.review_count];
           if (field.key === "rank") return [field.label, rowRankParts.rank];
           if (field.key === "rank_change") return [field.label, rowRankParts.rank_change];
+          if (field.key === "videos") return [field.label, []];
           return [field.label, field.key === "image" ? (cells[field.column_index]?.image || null) : (cells[field.column_index]?.text || "")];
         }));
       const videoContent = relatedColumnIndexes.video !== undefined
@@ -1015,14 +1039,14 @@ function collectionProjectData(result) {
   const metadata = result.metadata || {};
   const products = result.records.map((record) => {
     const relatedContent = record["关联内容"] ?? record.related_content ?? null;
-    const videos = record["视频"] ?? record.videos
-      ?? (Array.isArray(relatedContent?.video?.items)
-        ? relatedContent.video.items.filter((item) => item?.cover).map((item) => ({
-          cover_image: item.cover,
-          creator_name: item.creator || null,
-          visible_text: item.visible_text || ""
-        }))
-        : null);
+    const rawVideos = record["视频"] ?? record.videos
+      ?? (Array.isArray(relatedContent?.video?.items) ? relatedContent.video.items : null);
+    const videos = Array.isArray(rawVideos)
+      ? rawVideos.map((item) => ({
+        cover: item?.cover ?? item?.cover_image ?? null,
+        creator: item?.creator ?? item?.creator_name ?? null
+      })).filter((item) => Boolean(item.cover))
+      : null;
     return {
     rank: record["排名"] ?? null,
     rank_change: record["排名变化"] ?? null,
