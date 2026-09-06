@@ -351,7 +351,7 @@ function collectPageData() {
       const candidate = normalizeHeader(alias);
       if (!candidate) return best;
       if (normalized === candidate) return Math.max(best, 100 + candidate.length);
-      if (normalized.includes(candidate) || candidate.includes(normalized)) return Math.max(best, candidate.length);
+      if (normalized.includes(candidate)) return Math.max(best, candidate.length);
       return best;
     }, 0);
   };
@@ -400,7 +400,32 @@ function collectPageData() {
       const rank = parseRankNumber(rankElement.innerText || rankElement.textContent || "") ?? rowIndex + 1;
       return { rank, rank_change: parseRankChange(trendElement.innerText || trendElement.textContent || "") };
     }
-    return { rank: parseRankNumber(cell?.innerText || cell?.textContent || ""), rank_change: null };
+    const visibleNumericElements = containers.filter((element) => {
+      if (!isVisible(element)) return false;
+      const text = compactText(element.innerText || element.textContent || "", 100);
+      return /^(?:[↑↓]\s*)?(?:\d+\+?|[\-–—])$/.test(text);
+    });
+    const trendElement = visibleNumericElements.find((element) => {
+      const className = String(element.className || "");
+      const text = compactText(element.innerText || element.textContent || "", 100);
+      return /[↑↓]/.test(text) || /text-\[12px\]|trend|change/i.test(className);
+    });
+    if (trendElement) {
+      const parent = trendElement.parentElement;
+      const sibling = Array.from(parent?.children || [])
+        .filter((element) => element !== trendElement && isVisible(element))
+        .find((element) => parseRankNumber(element.innerText || element.textContent || "") !== null);
+      return {
+        rank: sibling ? parseRankNumber(sibling.innerText || sibling.textContent || "") : rowIndex + 1,
+        rank_change: parseRankChange(trendElement.innerText || trendElement.textContent || "")
+      };
+    }
+    const text = compactText(cell?.innerText || cell?.textContent || "", 100);
+    const values = text.match(/\d+\+?|[\-–—]/g) || [];
+    return {
+      rank: values.length > 1 ? parseRankNumber(values[0]) : (parseRankNumber(text) ?? rowIndex + 1),
+      rank_change: values.length > 1 ? parseRankChange(values[1]) : null
+    };
   };
   const pageMetadata = () => {
     const categoryElement = Array.from(document.querySelectorAll(".rank-arco-tag-content, [class~='rank-arco-tag-content'], [class*='rank-arco-tag-content']"))
@@ -411,14 +436,24 @@ function collectPageData() {
     const categoryShort = sampledCategory ? categoryFull.split(/\s*\/\s*/).filter(Boolean).at(-1) || categoryFull : "未识别";
     const pageHeading = Array.from(document.querySelectorAll("h1")).find(isVisible);
     const rankTypeLabels = ["总榜", "直播榜", "短视频榜", "商品卡", "达人榜", "新品榜"];
+    const isActiveTab = (element) => {
+      let current = element;
+      let depth = 0;
+      while (current && depth < 3) {
+        const active = current.getAttribute("aria-selected") === "true"
+          || current.getAttribute("aria-current") === "page"
+          || /(?:^|[-_\s])(active|selected|current)(?:$|[-_\s])/i.test(String(current.className || ""));
+        if (active) return true;
+        current = current.parentElement;
+        depth += 1;
+      }
+      return false;
+    };
     const rankTypeElement = Array.from(document.querySelectorAll("[role='tab'], button, a, [class*='tab']"))
       .filter(isVisible)
       .find((element) => {
         const text = compactText(element.innerText || element.textContent || "", 80);
-        const active = element.getAttribute("aria-selected") === "true"
-          || element.getAttribute("aria-current") === "page"
-          || /(?:^|[-_\s])(active|selected|current)(?:$|[-_\s])/i.test(String(element.className || ""));
-        return active && rankTypeLabels.includes(text);
+        return isActiveTab(element) && rankTypeLabels.includes(text);
       });
     const rankType = rankTypeElement ? compactText(rankTypeElement.innerText || rankTypeElement.textContent || "", 80) : "未识别";
     return {
