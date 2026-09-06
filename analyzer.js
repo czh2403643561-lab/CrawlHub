@@ -506,29 +506,60 @@ function collectPageData() {
     const match = String(text || "").match(/\+(\d+)/);
     return match ? Number(match[1]) : 0;
   };
+  const relatedCard = (image) => {
+    let current = image?.parentElement || null;
+    let depth = 0;
+    while (current && depth < 5) {
+      if (/(?:video|play)/i.test(String(current.className || ""))) return current;
+      current = current.parentElement;
+      depth += 1;
+    }
+    return image?.parentElement || null;
+  };
+  const relatedVisibleText = (element) => {
+    const text = compactText(element?.innerText || element?.textContent || "", 160);
+    return /^\+\d+$/.test(text) ? "" : text;
+  };
   const extractRelatedContent = (cell, type) => {
     if (!cell) return null;
     const images = Array.from(cell.querySelectorAll("img"));
     const text = compactText(cell.innerText || cell.textContent || "", 300);
     const items = images.slice(0, 12).map((image) => {
-      const url = relatedUrl(image);
-      if (type === "video") return { cover: imageUrl(image), url, creator: null };
-      return { avatar: imageUrl(image), name: null, profile: url };
-    }).filter((item) => Object.values(item).some(Boolean));
+      if (type === "video") {
+        const card = relatedCard(image);
+        return {
+          cover: imageUrl(image),
+          url: null,
+          creator: null,
+          visible_text: relatedVisibleText(card)
+        };
+      }
+      return { avatar: imageUrl(image), name: null, profile: relatedUrl(image) };
+    }).filter((item) => type === "video" ? Boolean(item.cover) : Object.values(item).some(Boolean));
     if (type === "creator" && !items.length && text && !/^\+\d+$/.test(text)) {
       const name = text.replace(/\s*ID:\s*@[^\s]+/i, "").trim();
       if (name) items.push({ avatar: null, name, profile: relatedUrl(cell) });
     }
     const additionalCount = relatedCount(text);
     if (!items.length && !additionalCount) return null;
-    return {
+    const result = {
       [type]: {
-        items,
+        items: type === "video" ? items.map(({ visible_text, ...item }) => item) : items,
         visible_count: items.length,
         additional_count: additionalCount,
         source_text: text || null
       }
     };
+    if (type === "video") {
+      result.videos = items
+        .filter((item) => Boolean(item.cover))
+        .map((item) => ({
+          cover_image: item.cover,
+          creator_name: item.creator || null,
+          visible_text: item.visible_text || ""
+        }));
+    }
+    return result;
   };
   const tableCandidates = Array.from(document.querySelectorAll("table"))
     .filter(isVisible)
@@ -605,11 +636,18 @@ function collectPageData() {
           if (field.key === "rank_change") return [field.label, rowRankParts.rank_change];
           return [field.label, field.key === "image" ? (cells[field.column_index]?.image || null) : (cells[field.column_index]?.text || "")];
         }));
+      const videoContent = relatedColumnIndexes.video !== undefined
+        ? extractRelatedContent(row.children[relatedColumnIndexes.video], "video")
+        : null;
+      const creatorContent = relatedColumnIndexes.creator !== undefined
+        ? extractRelatedContent(row.children[relatedColumnIndexes.creator], "creator")
+        : null;
       const relatedContent = {
-        ...(relatedColumnIndexes.video !== undefined ? extractRelatedContent(row.children[relatedColumnIndexes.video], "video") : null),
-        ...(relatedColumnIndexes.creator !== undefined ? extractRelatedContent(row.children[relatedColumnIndexes.creator], "creator") : null)
+        ...(videoContent?.video ? { video: videoContent.video } : {}),
+        ...(creatorContent?.creator ? { creator: creatorContent.creator } : {})
       };
       if (Object.keys(relatedContent).length) record["关联内容"] = relatedContent;
+      if (videoContent?.video) record["视频"] = videoContent.videos || [];
       return record;
     });
     return {
@@ -969,12 +1007,23 @@ const projectProductFields = [
   { key: "creator", label: "带货达人" },
   { key: "shop", label: "店铺" },
   { key: "similar_products", label: "同款商品数" },
+  { key: "videos", label: "视频", value_type: "object" },
   { key: "related_content", label: "关联内容", value_type: "object" }
 ];
 
 function collectionProjectData(result) {
   const metadata = result.metadata || {};
-  const products = result.records.map((record) => ({
+  const products = result.records.map((record) => {
+    const relatedContent = record["关联内容"] ?? record.related_content ?? null;
+    const videos = record["视频"] ?? record.videos
+      ?? (Array.isArray(relatedContent?.video?.items)
+        ? relatedContent.video.items.filter((item) => item?.cover).map((item) => ({
+          cover_image: item.cover,
+          creator_name: item.creator || null,
+          visible_text: item.visible_text || ""
+        }))
+        : null);
+    return {
     rank: record["排名"] ?? null,
     rank_change: record["排名变化"] ?? null,
     product_name: record["商品名称"] ?? null,
@@ -990,8 +1039,10 @@ function collectionProjectData(result) {
     creator: record["带货达人"] ?? null,
     shop: record["店铺"] ?? null,
     similar_products: record["同款商品数"] ?? null,
-    related_content: record["关联内容"] ?? record.related_content ?? null
-  }));
+    videos,
+    related_content: relatedContent
+    };
+  });
   return {
     metadata: {
       category_full: metadata.category_full || "未识别",
