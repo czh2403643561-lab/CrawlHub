@@ -339,6 +339,9 @@ function collectPageData() {
     { key: "gmv", label: "GMV", aliases: ["gmv", "成交额", "交易额", "gross merchandise value"], kind: "metric" },
     { key: "click_count", label: "点击次数", aliases: ["点击次数", "点击量", "click count", "clicks"], kind: "metric" },
     { key: "click_rate", label: "点击率", aliases: ["点击率", "ctr", "click through rate", "click-through rate"], kind: "percentage" },
+    { key: "live_account", label: "直播账号", aliases: ["直播账号", "直播间账号", "live account", "live stream account"], kind: "text" },
+    { key: "best_video", label: "表现最佳的视频", aliases: ["表现最佳的视频", "最佳视频", "top performing video", "best performing video", "best video"], kind: "text" },
+    { key: "creator", label: "带货达人", aliases: ["带货达人", "达人账号", "creator", "influencer", "affiliate creator"], kind: "text" },
     { key: "shop", label: "店铺", aliases: ["店铺名称", "店铺", "shop name", "shop", "store", "seller"], kind: "text" },
     { key: "similar_product_count", label: "同款商品数", aliases: ["同款商品数", "同款数", "similar product count", "similar products", "similar items"], kind: "metric" }
   ];
@@ -715,6 +718,9 @@ const projectProductFields = [
   { key: "gmv", label: "GMV" },
   { key: "clicks", label: "点击次数" },
   { key: "ctr", label: "点击率" },
+  { key: "live_account", label: "直播账号" },
+  { key: "best_video", label: "表现最佳的视频" },
+  { key: "creator", label: "带货达人" },
   { key: "shop", label: "店铺" },
   { key: "similar_products", label: "同款商品数" }
 ];
@@ -732,6 +738,9 @@ function collectionProjectData(result) {
     gmv: record["GMV"] ?? null,
     clicks: record["点击次数"] ?? null,
     ctr: record["点击率"] ?? null,
+    live_account: record["直播账号"] ?? null,
+    best_video: record["表现最佳的视频"] ?? null,
+    creator: record["带货达人"] ?? null,
     shop: record["店铺"] ?? null,
     similar_products: record["同款商品数"] ?? null
   }));
@@ -741,7 +750,8 @@ function collectionProjectData(result) {
       category_short: metadata.category_short || "未识别",
       page_title: metadata.page_title || "未识别",
       url: metadata.url || location.href,
-      created_at: metadata.created_at || new Date().toISOString()
+      created_at: metadata.created_at || new Date().toISOString(),
+      rank_type: metadata.rank_type || "未识别"
     },
     products
   };
