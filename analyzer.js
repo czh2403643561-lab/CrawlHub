@@ -280,7 +280,7 @@ function analyzePage() {
     selected_elements: selectedElements,
     sampling: {
       selected_count: selectedElements.length,
-      mode: window.__crawlHubSamplingActive ? "sampling" : "idle"
+      mode: window.__crawlHubSamplingState || (window.__crawlHubSamplingActive ? "sampling" : "idle")
     },
     text_nodes: { items: textNodes, count: textNodes.length, omitted_count: omittedTextNodes },
     images: { items: images, count: images.length, omitted_count: Math.max(0, document.images.length - images.length) },
@@ -1208,8 +1208,15 @@ function startNetworkObserver() {
 }
 
 function startElementSampling() {
+  if (window.__crawlHubSamplingState === "sampling") {
+    return { started: true, already_running: true };
+  }
+  if (window.__crawlHubSamplingState === "paused") {
+    return resumeElementSampling();
+  }
   if (window.__crawlHubSamplingCleanup) window.__crawlHubSamplingCleanup();
   window.__crawlHubSamplingActive = true;
+  window.__crawlHubSamplingState = "sampling";
   window.__crawlHubSelectedElements = [];
 
   const compactText = (value, length = 240) => {
@@ -1301,7 +1308,7 @@ function startElementSampling() {
   });
 
   const notice = document.createElement("div");
-  notice.textContent = "CrawlHub：采样中，点击多个页面元素；完成后回到面板结束";
+  notice.textContent = "CrawlHub：采样中，点击多个页面元素；可暂停后滚动页面";
   Object.assign(notice.style, {
     position: "fixed",
     zIndex: "2147483647",
@@ -1356,24 +1363,81 @@ function startElementSampling() {
       notice.textContent = `CrawlHub：已选择 ${window.__crawlHubSelectedElements.length} 个元素，继续点击或完成采样`;
     }
   };
+  const onKey = (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    cancelElementSampling();
+  };
+  const attach = () => {
+    window.__crawlHubSamplingActive = true;
+    window.__crawlHubSamplingState = "sampling";
+    notice.style.display = "block";
+    document.addEventListener("mousemove", onMove, true);
+    document.addEventListener("click", onClick, true);
+    document.addEventListener("keydown", onKey, true);
+  };
   const cleanup = () => {
     document.removeEventListener("mousemove", onMove, true);
     document.removeEventListener("click", onClick, true);
+    document.removeEventListener("keydown", onKey, true);
     notice.remove();
     highlight.remove();
     window.__crawlHubSamplingActive = false;
+    window.__crawlHubSamplingState = "idle";
     delete window.__crawlHubSamplingCleanup;
+    delete window.__crawlHubSamplingPause;
+    delete window.__crawlHubSamplingResume;
+  };
+  const pause = () => {
+    if (window.__crawlHubSamplingState !== "sampling") return { paused: false };
+    document.removeEventListener("mousemove", onMove, true);
+    document.removeEventListener("click", onClick, true);
+    highlight.style.display = "none";
+    notice.style.display = "none";
+    window.__crawlHubSamplingActive = false;
+    window.__crawlHubSamplingState = "paused";
+    return { paused: true, selected_count: window.__crawlHubSelectedElements.length };
+  };
+  const resume = () => {
+    if (window.__crawlHubSamplingState !== "paused") return { resumed: false };
+    attach();
+    return { resumed: true, selected_count: window.__crawlHubSelectedElements.length };
   };
 
   window.__crawlHubSamplingCleanup = cleanup;
-  document.addEventListener("mousemove", onMove, true);
-  document.addEventListener("click", onClick, true);
+  window.__crawlHubSamplingPause = pause;
+  window.__crawlHubSamplingResume = resume;
+  attach();
   return { started: true };
+}
+
+function pauseElementSampling() {
+  const result = window.__crawlHubSamplingPause?.() || { paused: false };
+  if (result.paused && window.__crawlHubSamplingChanged) window.__crawlHubSamplingChanged();
+  return result;
+}
+
+function resumeElementSampling() {
+  const result = window.__crawlHubSamplingResume?.() || { resumed: false };
+  if (result.resumed && window.__crawlHubSamplingChanged) window.__crawlHubSamplingChanged();
+  return result;
+}
+
+function cancelElementSampling() {
+  const selectedCount = Array.isArray(window.__crawlHubSelectedElements) ? window.__crawlHubSelectedElements.length : 0;
+  if (window.__crawlHubSamplingCleanup) window.__crawlHubSamplingCleanup();
+  window.__crawlHubSamplingActive = false;
+  window.__crawlHubSamplingState = "idle";
+  window.__crawlHubSelectedElements = [];
+  if (window.__crawlHubSamplingChanged) window.__crawlHubSamplingChanged();
+  return { cancelled: true, selected_count: selectedCount };
 }
 
 function stopElementSampling() {
   if (window.__crawlHubSamplingCleanup) window.__crawlHubSamplingCleanup();
   window.__crawlHubSamplingActive = false;
+  window.__crawlHubSamplingState = "idle";
   return { stopped: true, selected_count: Array.isArray(window.__crawlHubSelectedElements) ? window.__crawlHubSelectedElements.length : 0 };
 }
 
@@ -1417,6 +1481,8 @@ function installPanel() {
       .hint { margin-bottom: 10px; color: #667085; font-size: 12px; }
       .state { margin-bottom: 8px; font-weight: 600; }
       .state span { color: #16794c; }
+      .state span[data-sampling-state="paused"] { color: #b54708; }
+      .state span[data-sampling-state="idle"] { color: #667085; }
       .count { margin-bottom: 8px; color: #344054; }
       .field-summary { min-height: 20px; margin-bottom: 10px; color: #475467; font-size: 12px; }
       .samples { max-height: 180px; margin: 0 0 12px; padding: 0; overflow: auto; list-style: none; }
@@ -1426,6 +1492,7 @@ function installPanel() {
       .actions button { width: 100%; border: 0; border-radius: 7px; padding: 8px 10px; color: #fff; background: #315efb; cursor: pointer; font: inherit; font-weight: 600; }
       .actions button.secondary { color: #315efb; background: #e8edff; }
       .actions button:disabled { cursor: default; opacity: .6; }
+      .actions button[hidden] { display: none; }
       .message { min-height: 18px; margin-top: 9px; color: #667085; font-size: 12px; }
       .message.success { color: #16794c; }
       .message.error { color: #b42318; }
@@ -1465,6 +1532,9 @@ function installPanel() {
           <ul id="samples" class="samples"></ul>
           <div class="actions">
             <button id="sample">开始元素采样</button>
+            <button id="pauseSampling" class="secondary" hidden>暂停采样</button>
+            <button id="resumeSampling" class="secondary" hidden>继续采样</button>
+            <button id="cancelSampling" class="secondary" hidden>取消采样</button>
             <button id="observe" class="secondary">监听后续网络请求</button>
             <button id="analyze" class="secondary">分析并下载 analysis.json</button>
           </div>
@@ -1513,6 +1583,9 @@ function installPanel() {
   const fieldSummary = shadow.querySelector("#fieldSummary");
   const samples = shadow.querySelector("#samples");
   const sampleButton = shadow.querySelector("#sample");
+  const pauseSamplingButton = shadow.querySelector("#pauseSampling");
+  const resumeSamplingButton = shadow.querySelector("#resumeSampling");
+  const cancelSamplingButton = shadow.querySelector("#cancelSampling");
   const observeButton = shadow.querySelector("#observe");
   const analyzeButton = shadow.querySelector("#analyze");
   const message = shadow.querySelector("#message");
@@ -1622,7 +1695,9 @@ function installPanel() {
   const render = () => {
     const selected = Array.isArray(window.__crawlHubSelectedElements) ? window.__crawlHubSelectedElements : [];
     countText.textContent = String(selected.length);
-    stateText.textContent = window.__crawlHubSamplingActive ? "元素采样中" : "待机";
+    const samplingState = window.__crawlHubSamplingState || (window.__crawlHubSamplingActive ? "sampling" : "idle");
+    stateText.textContent = samplingState === "sampling" ? "元素采样中" : samplingState === "paused" ? "已暂停" : "待机";
+    stateText.dataset.samplingState = samplingState;
     const fields = Array.from(new Set(selected.flatMap((item) => item.possible_field_types || [])));
     fieldSummary.textContent = `已选择字段摘要：${fields.length ? fields.join("、") : "暂无"}`;
     samples.replaceChildren();
@@ -1631,7 +1706,11 @@ function installPanel() {
       row.textContent = `${index + 1}. ${item.tag} · ${item.possible_field_types?.join("/") || "text"} · ${item.text || item.selector}`;
       samples.appendChild(row);
     });
-    sampleButton.textContent = window.__crawlHubSamplingActive ? "完成采样并生成报告" : "开始元素采样";
+    sampleButton.textContent = samplingState === "idle" ? "开始元素采样" : "完成采样并生成报告";
+    sampleButton.disabled = samplingState === "paused";
+    pauseSamplingButton.hidden = samplingState !== "sampling";
+    resumeSamplingButton.hidden = samplingState !== "paused";
+    cancelSamplingButton.hidden = samplingState === "idle";
     observeButton.textContent = window.__crawlHubNetworkObserverInstalled ? "网络监听已开启" : "监听后续网络请求";
     observeButton.disabled = Boolean(window.__crawlHubNetworkObserverInstalled);
   };
@@ -1701,15 +1780,28 @@ function installPanel() {
     }
   });
   sampleButton.addEventListener("click", () => {
-    if (window.__crawlHubSamplingActive) {
+    if (window.__crawlHubSamplingState === "sampling") {
       stopElementSampling();
       render();
       downloadReport();
       return;
     }
+    if (window.__crawlHubSamplingState === "paused") return;
     startElementSampling();
     render();
-    setMessage("请连续点击页面元素，完成后点击“完成采样并生成报告”。");
+    setMessage("采样中：可点击页面元素；需要移动页面时点击“暂停采样”。");
+  });
+  pauseSamplingButton.addEventListener("click", () => {
+    const result = pauseElementSampling();
+    if (result.paused) setMessage(`采样已暂停，已保留 ${result.selected_count} 个元素。现在可以滚动和操作页面。`, "success");
+  });
+  resumeSamplingButton.addEventListener("click", () => {
+    const result = resumeElementSampling();
+    if (result.resumed) setMessage(`已继续采样，当前保留 ${result.selected_count} 个元素。`, "success");
+  });
+  cancelSamplingButton.addEventListener("click", () => {
+    const result = cancelElementSampling();
+    setMessage(`已取消采样，本轮未完成的 ${result.selected_count} 个元素已清除。`, "success");
   });
   observeButton.addEventListener("click", () => {
     try {
@@ -1736,6 +1828,6 @@ function installPanel() {
   return { started: true, already_open: false };
 }
 
-window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, collectCurrentPage, clearCollectionData, collectionXlsx, collectionProjectData, exportCollectionProject, saveCollectionTemplate, startNetworkObserver, startElementSampling, stopElementSampling, installPanel };
+window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, collectCurrentPage, clearCollectionData, collectionXlsx, collectionProjectData, exportCollectionProject, saveCollectionTemplate, startNetworkObserver, startElementSampling, pauseElementSampling, resumeElementSampling, cancelElementSampling, stopElementSampling, installPanel };
 
 })();
