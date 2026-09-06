@@ -638,26 +638,174 @@ function collectionEnvironment(result, pagination) {
   };
 }
 
-function clearCollectionData() {
+const collectionTaskSessionKey = "crawlHub.collection.tasks.v1";
+
+function collectionTaskIdentity(metadata) {
+  const category = exportDirectoryName(metadata.category_short || metadata.category_full || "未识别");
+  const rankType = rankingDirectoryName(metadata);
+  return {
+    task_id: `${category}__${rankType}`,
+    category,
+    rank_type: rankType,
+    label: `${category} / ${rankType}`
+  };
+}
+
+function readCollectionTaskSessions() {
+  try {
+    const value = JSON.parse(sessionStorage.getItem(collectionTaskSessionKey) || "null");
+    if (!value || typeof value !== "object") return { active_task_id: null, tasks: {} };
+    return {
+      active_task_id: value.active_task_id || null,
+      tasks: value.tasks && typeof value.tasks === "object" ? value.tasks : {}
+    };
+  } catch {
+    return { active_task_id: null, tasks: {} };
+  }
+}
+
+function writeCollectionTaskSessions(sessions) {
+  try { sessionStorage.setItem(collectionTaskSessionKey, JSON.stringify(sessions)); } catch { }
+}
+
+function applyCollectionTaskSnapshot(identity, snapshot, status = "active") {
+  const result = snapshot?.result;
+  if (!result || !Array.isArray(snapshot.pages)) return false;
+  window.__crawlHubManualCollectionPages = snapshot.pages;
+  window.__crawlHubCollectionPreview = result;
+  window.__crawlHubCollectionEnvironment = snapshot.environment || null;
+  window.__crawlHubCollectionFieldTemplate = result.field_template || snapshot.field_template || [];
+  window.__crawlHubCollectionRawColumns = result.raw_columns || snapshot.raw_columns || [];
+  window.__crawlHubCollectionSourceType = result.source_type || snapshot.source_type || null;
+  window.__crawlHubCurrentProjectId = result.project_id || identity.task_id;
+  window.__crawlHubManualCollectionState = {
+    last_page: result.pagination?.current_page || null,
+    collected_pages: result.pagination?.collected_pages || snapshot.pages.length,
+    collected_items: result.item_count || result.records.length,
+    duplicate: false
+  };
+  window.__crawlHubActiveTask = { ...identity, status, collected_count: result.item_count || result.records.length };
+  return true;
+}
+
+function collectionTaskSnapshot(identity) {
+  const result = window.__crawlHubCollectionPreview;
+  if (!result || !Array.isArray(window.__crawlHubManualCollectionPages)) return null;
+  return {
+    url: location.href,
+    pages: window.__crawlHubManualCollectionPages,
+    result,
+    environment: window.__crawlHubCollectionEnvironment || null,
+    field_template: window.__crawlHubCollectionFieldTemplate || result.field_template || [],
+    raw_columns: window.__crawlHubCollectionRawColumns || result.raw_columns || [],
+    source_type: window.__crawlHubCollectionSourceType || result.source_type || null,
+    task_id: identity.task_id
+  };
+}
+
+function persistCollectionTaskSession(identity) {
+  const snapshot = collectionTaskSnapshot(identity);
+  if (!snapshot) return;
+  const sessions = readCollectionTaskSessions();
+  sessions.active_task_id = identity.task_id;
+  sessions.tasks[identity.task_id] = { ...snapshot, status: window.__crawlHubActiveTask?.status || "active", updated_at: new Date().toISOString() };
+  writeCollectionTaskSessions(sessions);
+}
+
+function clearActiveTaskView() {
   window.__crawlHubManualCollectionPages = [];
   delete window.__crawlHubCollectionPreview;
   delete window.__crawlHubManualCollectionState;
   delete window.__crawlHubCollectionEnvironment;
   delete window.__crawlHubPaginationState;
-  try { sessionStorage.removeItem("crawlHub.collection.session.v1"); } catch { }
+  delete window.__crawlHubActiveTask;
+}
+
+async function activateCollectionTask(identity, metadata = {}) {
+  const sessions = readCollectionTaskSessions();
+  const session = sessions.tasks[identity.task_id];
+  if (session?.url === location.href && applyCollectionTaskSnapshot(identity, session, session.status || "active")) return true;
+  try {
+    const stored = await projectStorageRequest("crawlHub:read-project", { project_id: identity.task_id });
+    if (applyStoredCollectionTask(identity, stored.project)) return true;
+    const legacy = await projectStorageRequest("crawlHub:read-project", { project_id: legacyProjectFolderName({ ...metadata, category_short: identity.category }) });
+    if (applyStoredCollectionTask(identity, legacy.project)) return true;
+  } catch { }
+  clearActiveTaskView();
+  window.__crawlHubActiveTask = { ...identity, status: "active", collected_count: 0 };
+  return false;
+}
+
+function applyStoredCollectionTask(identity, project) {
+  const storedTask = project?.task;
+  if (storedTask?.snapshot && applyCollectionTaskSnapshot(identity, storedTask.snapshot, storedTask.status || "active")) return true;
+  if (!Array.isArray(project?.products) || !project.products.length) return false;
+  const records = project.products.map((product) => Object.fromEntries(projectProductFields.map((field) => [field.label, product[field.key] ?? null])));
+  const result = {
+    metadata: project.metadata || {},
+    source_type: "restored_session",
+    item_count: records.length,
+    raw_columns: projectProductFields.map((field, index) => ({ header: field.label, column_index: index })),
+    field_template: projectProductFields.map((field, index) => ({ key: field.key, label: field.label, value_type: "text", source_header: field.label, column_index: index, available: records.some((record) => record[field.label] !== null && record[field.label] !== ""), match_confidence: "restored" })),
+    records,
+    preview_records: records.slice(0, 5),
+    pagination: { current_page: null, total_items: records.length, items_per_page: null, total_pages: null, collected_pages: 1 },
+    project_id: project.project_id || identity.task_id
+  };
+  return applyCollectionTaskSnapshot(identity, { pages: [{ key: "restored-project", page: null, result }], result }, storedTask?.status || "active");
+}
+
+function clearCollectionData() {
+  const identity = window.__crawlHubActiveTask;
+  clearActiveTaskView();
+  const sessions = readCollectionTaskSessions();
+  if (identity) delete sessions.tasks[identity.task_id];
+  if (sessions.active_task_id === identity?.task_id) sessions.active_task_id = null;
+  writeCollectionTaskSessions(sessions);
   return { cleared: true };
+}
+
+async function saveCurrentTaskStatus(status) {
+  const task = window.__crawlHubActiveTask;
+  const result = window.__crawlHubCollectionPreview;
+  if (!task || !result) return null;
+  task.status = status;
+  const savedProject = await saveInternalProject(result, {
+    identity: task,
+    pages: window.__crawlHubManualCollectionPages || [],
+    environment: window.__crawlHubCollectionEnvironment,
+    status,
+    collected_count: result.item_count,
+    field_template: result.field_template,
+    collection_state: result.pagination
+  });
+  result.project_id = savedProject.project_id;
+  task.collected_count = result.item_count;
+  persistCollectionTaskSession(task);
+  return savedProject;
 }
 
 async function collectCurrentPage() {
   const result = collectPageData();
   const pagination = detectPaginationState();
   const environment = collectionEnvironment(result, pagination);
+  const nextTask = collectionTaskIdentity(result.metadata);
+  const currentTask = window.__crawlHubActiveTask;
+  if (currentTask && currentTask.task_id !== nextTask.task_id) {
+    const confirmed = window.confirm(`检测到类目或榜单已变化。\n旧任务数据会保留，新榜单将创建新的采集任务。\n\n是否切换到“${nextTask.label}”？`);
+    if (!confirmed) return { cancelled: true, task_switch_cancelled: true, result: window.__crawlHubCollectionPreview || null, pagination, duplicate: false };
+    await activateCollectionTask(nextTask, result.metadata);
+  } else if (!currentTask) {
+    await activateCollectionTask(nextTask, result.metadata);
+  }
+  window.__crawlHubActiveTask = { ...nextTask, status: "active", collected_count: window.__crawlHubActiveTask?.collected_count || 0 };
   const existingPages = Array.isArray(window.__crawlHubManualCollectionPages) ? window.__crawlHubManualCollectionPages : [];
   const previousEnvironment = window.__crawlHubCollectionEnvironment;
   if (existingPages.length && previousEnvironment && previousEnvironment.signature !== JSON.stringify(environment)) {
-    const confirmed = window.confirm("当前分页数量或页面采集环境已变化。\n是否开始新的采集任务？\n\n确认后将清除旧的已采集数据和当前进度。\n字段模板不会删除。");
+    const confirmed = window.confirm("当前任务的分页或页面结构发生变化。\n旧任务数据会保留，本次将重新记录当前页面结果。\n\n是否继续？");
     if (!confirmed) return { cancelled: true, result: window.__crawlHubCollectionPreview || null, pagination, duplicate: false };
     clearCollectionData();
+    window.__crawlHubActiveTask = { ...nextTask, status: "active", collected_count: 0 };
   }
   const pageKey = pagination.current_page ? `page:${pagination.current_page}` : `records:${JSON.stringify(result.records)}`;
   if (!Array.isArray(window.__crawlHubManualCollectionPages)) window.__crawlHubManualCollectionPages = [];
@@ -692,12 +840,10 @@ async function collectCurrentPage() {
       collected_pages: pages.length
     }
   };
-  const savedProject = await saveInternalProject(merged);
+  const environmentSnapshot = { ...environment, signature: JSON.stringify(environment) };
+  const savedProject = await saveInternalProject(merged, { identity: nextTask, pages, environment: environmentSnapshot });
   merged.project_id = savedProject.project_id;
-  try {
-    sessionStorage.setItem("crawlHub.collection.session.v1", JSON.stringify({ url: location.href, pages, result: merged }));
-  } catch { }
-  window.__crawlHubCollectionEnvironment = { ...environment, signature: JSON.stringify(environment) };
+  window.__crawlHubCollectionEnvironment = environmentSnapshot;
   window.__crawlHubCollectionFieldTemplate = result.field_template;
   window.__crawlHubCollectionRawColumns = result.raw_columns;
   window.__crawlHubCollectionSourceType = result.source_type;
@@ -708,6 +854,8 @@ async function collectCurrentPage() {
     collected_items: records.length,
     duplicate: alreadyCollected
   };
+  window.__crawlHubActiveTask = { ...nextTask, status: "active", collected_count: records.length };
+  persistCollectionTaskSession(nextTask);
   return { result: merged, pagination, duplicate: alreadyCollected, cancelled: false };
 }
 
@@ -763,21 +911,22 @@ function collectionProjectData(result) {
 
 function restoreCollectionSession() {
   try {
-    const saved = JSON.parse(sessionStorage.getItem("crawlHub.collection.session.v1") || "null");
-    if (!saved || saved.url !== location.href || !saved.result || !Array.isArray(saved.pages)) return false;
-    window.__crawlHubManualCollectionPages = saved.pages;
-    window.__crawlHubCollectionPreview = saved.result;
-    window.__crawlHubCurrentProjectId = saved.result.project_id || window.__crawlHubCurrentProjectId;
-    window.__crawlHubCollectionFieldTemplate = saved.result.field_template || [];
-    window.__crawlHubCollectionRawColumns = saved.result.raw_columns || [];
-    window.__crawlHubCollectionSourceType = saved.result.source_type || null;
-    window.__crawlHubManualCollectionState = {
-      last_page: saved.result.pagination?.current_page || null,
-      collected_pages: saved.result.pagination?.collected_pages || saved.pages.length,
-      collected_items: saved.result.item_count || saved.result.records.length,
-      duplicate: false
-    };
-    return true;
+    const sessions = readCollectionTaskSessions();
+    const activeTaskId = sessions.active_task_id;
+    const saved = activeTaskId ? sessions.tasks[activeTaskId] : null;
+    if (saved?.url === location.href) {
+      return applyCollectionTaskSnapshot(collectionTaskIdentity(saved.result?.metadata || {}), saved, saved.status || "active");
+    }
+    const legacy = JSON.parse(sessionStorage.getItem("crawlHub.collection.session.v1") || "null");
+    if (legacy?.url === location.href && legacy.result && Array.isArray(legacy.pages)) {
+      const identity = collectionTaskIdentity(legacy.result.metadata || {});
+      const migrated = { ...legacy, task_id: identity.task_id, status: "active" };
+      sessions.active_task_id = identity.task_id;
+      sessions.tasks[identity.task_id] = migrated;
+      writeCollectionTaskSessions(sessions);
+      return applyCollectionTaskSnapshot(identity, migrated, "active");
+    }
+    return false;
   } catch {
     return false;
   }
@@ -819,9 +968,29 @@ function markReconnectPending() {
   try { sessionStorage.setItem("crawlHub.reconnect.pending", "1"); } catch { }
 }
 
-async function saveInternalProject(result) {
+async function saveInternalProject(result, taskState = {}) {
   const project = collectionProjectData(result);
-  const projectId = projectFolderName(project.metadata);
+  const identity = taskState.identity || collectionTaskIdentity(project.metadata);
+  const projectId = identity.task_id;
+  project.task = {
+    task_id: projectId,
+    category: identity.category,
+    rank_type: identity.rank_type,
+    status: taskState.status || "active",
+    collected_count: taskState.collected_count ?? result.item_count ?? result.records.length,
+    field_template: taskState.field_template || result.field_template || [],
+    collection_state: taskState.collection_state || result.pagination || null,
+    snapshot: taskState.pages ? {
+      url: location.href,
+      pages: taskState.pages,
+      result: { ...result, project_id: projectId },
+      environment: taskState.environment || null,
+      field_template: taskState.field_template || result.field_template || [],
+      raw_columns: result.raw_columns || [],
+      source_type: result.source_type || null,
+      task_id: projectId
+    } : null
+  };
   const response = await projectStorageRequest("crawlHub:save-project", { project_id: projectId, project });
   window.__crawlHubCurrentProjectId = projectId;
   return response.project;
@@ -1029,7 +1198,11 @@ async function findDirectory(parent, name) {
 }
 
 function projectFolderName(metadata) {
-  const shortName = String(metadata.category_short || "未识别").replace(/[\\/:*?"<>|]/g, "_").replace(/\s+/g, " ").trim() || "未识别";
+  return collectionTaskIdentity(metadata).task_id;
+}
+
+function legacyProjectFolderName(metadata) {
+  const shortName = String(metadata.category_short || metadata.category || "未识别").replace(/[\\/:*?"<>|]/g, "_").replace(/\s+/g, " ").trim() || "未识别";
   const createdAt = new Date(metadata.created_at);
   const date = Number.isNaN(createdAt.valueOf()) ? new Date() : createdAt;
   const localDate = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -1696,6 +1869,7 @@ function installPanel() {
             <strong>当前页数据提取验证</strong>
             <p>根据表头和行列关系生成字段模板，提取当前已加载的表格或列表数据。</p>
             <div id="collectionState" class="collection-meta">尚未采集</div>
+            <div id="taskStatus" class="collection-meta">当前任务：未创建</div>
             <div id="metadataStatus" class="collection-meta">metadata：等待采样顶部类目标签</div>
             <div id="exportRootStatus" class="collection-meta">默认导出目录：未设置（请点击齿轮设置）</div>
             <div id="paginationStatus" class="collection-meta">分页状态：未识别</div>
@@ -1705,6 +1879,8 @@ function installPanel() {
           </div>
           <div class="actions collection-actions" style="margin-top: 7px;">
             <button id="collectCollection">采集当前页</button>
+            <button id="pauseCollectionTask" class="secondary" hidden>暂停采集</button>
+            <button id="cancelCollectionTask" class="secondary" hidden>取消当前任务</button>
             <button id="exportProject" class="secondary">导出项目</button>
             <button id="saveCollectionTemplate" class="secondary">保存字段模板</button>
             <button id="clearCollectionData" class="secondary">清除采集数据</button>
@@ -1724,6 +1900,7 @@ function installPanel() {
   const analysisModeButton = shadow.querySelector("#analysisMode");
   const collectionModeButton = shadow.querySelector("#collectionMode");
   const collectionState = shadow.querySelector("#collectionState");
+  const taskStatus = shadow.querySelector("#taskStatus");
   const metadataStatus = shadow.querySelector("#metadataStatus");
   const exportRootStatus = shadow.querySelector("#exportRootStatus");
   const paginationStatus = shadow.querySelector("#paginationStatus");
@@ -1731,6 +1908,8 @@ function installPanel() {
   const collectionPreviewTable = shadow.querySelector("#collectionPreviewTable");
   const templateStatus = shadow.querySelector("#templateStatus");
   const collectCollectionButton = shadow.querySelector("#collectCollection");
+  const pauseCollectionTaskButton = shadow.querySelector("#pauseCollectionTask");
+  const cancelCollectionTaskButton = shadow.querySelector("#cancelCollectionTask");
   const exportProjectButton = shadow.querySelector("#exportProject");
   const saveCollectionTemplateButton = shadow.querySelector("#saveCollectionTemplate");
   const clearCollectionDataButton = shadow.querySelector("#clearCollectionData");
@@ -1776,6 +1955,16 @@ function installPanel() {
     renderExportRootStatus();
     const result = window.__crawlHubCollectionPreview;
     const manualState = window.__crawlHubManualCollectionState;
+    const activeTask = window.__crawlHubActiveTask;
+    const taskStatusLabel = activeTask?.status === "paused" ? "已暂停" : activeTask?.status === "cancelled" ? "已结束" : "采集中";
+    taskStatus.textContent = activeTask
+      ? `当前任务：${activeTask.label} · ${taskStatusLabel} · 已采集${activeTask.collected_count || result?.item_count || 0}条`
+      : "当前任务：未创建";
+    pauseCollectionTaskButton.hidden = !activeTask || activeTask.status === "cancelled";
+    pauseCollectionTaskButton.textContent = activeTask?.status === "paused" ? "继续采集" : "暂停采集";
+    pauseCollectionTaskButton.disabled = Boolean(window.__crawlHubCollectionBusy);
+    cancelCollectionTaskButton.hidden = !activeTask || activeTask.status === "cancelled";
+    cancelCollectionTaskButton.disabled = Boolean(window.__crawlHubCollectionBusy);
     const fieldTemplate = result?.field_template || window.__crawlHubCollectionFieldTemplate || [];
     const pageState = detectPaginationState();
     const pageText = pageState.current_page && pageState.total_pages
@@ -1927,6 +2116,10 @@ function installPanel() {
   });
   reconnectPageButton.addEventListener("click", reconnectPage);
   collectCollectionButton.addEventListener("click", async () => {
+    if (window.__crawlHubActiveTask?.status === "paused") {
+      setMessage("当前任务已暂停，请先点击“继续采集”。", "error");
+      return;
+    }
     try {
       setMessage("正在检查页面连接…");
       try {
@@ -1936,6 +2129,8 @@ function installPanel() {
         return;
       }
       setMessage("采集中…");
+      window.__crawlHubCollectionBusy = true;
+      renderCollection();
       collectCollectionButton.disabled = true;
       const collected = await collectCurrentPage();
       if (collected.cancelled) {
@@ -1948,7 +2143,34 @@ function installPanel() {
     } catch (error) {
       setMessage(`提取失败：${error.message || "无法读取当前页面"}`, "error");
     } finally {
+      window.__crawlHubCollectionBusy = false;
       collectCollectionButton.disabled = false;
+      renderCollection();
+    }
+  });
+  pauseCollectionTaskButton.addEventListener("click", async () => {
+    const task = window.__crawlHubActiveTask;
+    if (!task) return;
+    const nextStatus = task.status === "paused" ? "active" : "paused";
+    try {
+      await saveCurrentTaskStatus(nextStatus);
+      renderCollection();
+      setMessage(nextStatus === "paused" ? "采集已暂停，当前进度已保留。" : "采集已继续，可以采集下一页。", "success");
+    } catch (error) {
+      setMessage(`任务状态保存失败：${error.message || "无法保存当前进度"}`, "error");
+    }
+  });
+  cancelCollectionTaskButton.addEventListener("click", async () => {
+    const task = window.__crawlHubActiveTask;
+    if (!task) return;
+    const confirmed = window.confirm("确认结束当前采集任务？\n已有数据会保留，之后可再次切换回来继续采集。");
+    if (!confirmed) return;
+    try {
+      await saveCurrentTaskStatus("cancelled");
+      renderCollection();
+      setMessage("当前任务已结束，已有数据已保留。", "success");
+    } catch (error) {
+      setMessage(`任务结束失败：${error.message || "无法保存当前进度"}`, "error");
     }
   });
   exportProjectButton.addEventListener("click", async () => {
