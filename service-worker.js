@@ -5,14 +5,6 @@ async function readProjects() {
   return stored[PROJECTS_STORAGE_KEY] || {};
 }
 
-function latestProject(projects) {
-  return Object.values(projects).sort((left, right) => {
-    const leftTime = new Date(left.saved_at || left.metadata?.created_at || 0).valueOf();
-    const rightTime = new Date(right.saved_at || right.metadata?.created_at || 0).valueOf();
-    return rightTime - leftTime;
-  })[0] || null;
-}
-
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message?.type?.startsWith("crawlHub:")) return undefined;
 
@@ -37,9 +29,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
     if (message.type === "crawlHub:read-project") {
       return { project: projects[String(message.project_id || "")] || null };
-    }
-    if (message.type === "crawlHub:read-latest-project") {
-      return { project: latestProject(projects) };
     }
     throw new Error("不支持的数据操作");
   })().then(
