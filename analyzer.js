@@ -355,8 +355,7 @@ function collectPageData() {
       return best;
     }, 0);
   };
-  const imageSource = (cell) => {
-    const image = cell?.querySelector("img");
+  const imageUrl = (image) => {
     if (!image) return null;
     const candidates = [image.getAttribute("src"), image.getAttribute("data-src"), image.currentSrc, image.src]
       .filter((value) => value && !String(value).startsWith("data:"));
@@ -367,6 +366,7 @@ function collectPageData() {
       return candidates[0];
     }
   };
+  const imageSource = (cell) => imageUrl(cell?.querySelector("img"));
   const cellDetails = (row) => Array.from(row.children)
     .filter((cell) => ["td", "th"].includes(cell.tagName.toLowerCase()))
     .map((cell) => ({ text: compactText(cell.innerText || cell.textContent || "", 2000), image: imageSource(cell) }));
@@ -481,6 +481,55 @@ function collectPageData() {
       has_embedded_details: Boolean(priceMatch || ratingMatch || reviewMatch)
     };
   };
+  const relatedUrl = (element) => {
+    let current = element;
+    let depth = 0;
+    while (current && depth < 5) {
+      const candidates = [
+        current.getAttribute?.("href"),
+        current.getAttribute?.("data-url"),
+        current.getAttribute?.("data-href"),
+        current.getAttribute?.("data-link")
+      ].filter(Boolean);
+      const link = current.querySelector?.("a[href]");
+      if (link) candidates.push(link.getAttribute("href"));
+      const value = candidates.find((candidate) => !String(candidate).startsWith("javascript:"));
+      if (value) {
+        try { return new URL(value, location.href).href; } catch { return String(value); }
+      }
+      current = current.parentElement;
+      depth += 1;
+    }
+    return null;
+  };
+  const relatedCount = (text) => {
+    const match = String(text || "").match(/\+(\d+)/);
+    return match ? Number(match[1]) : 0;
+  };
+  const extractRelatedContent = (cell, type) => {
+    if (!cell) return null;
+    const images = Array.from(cell.querySelectorAll("img"));
+    const text = compactText(cell.innerText || cell.textContent || "", 300);
+    const items = images.slice(0, 12).map((image) => {
+      const url = relatedUrl(image);
+      if (type === "video") return { cover: imageUrl(image), url, creator: null };
+      return { avatar: imageUrl(image), name: null, profile: url };
+    }).filter((item) => Object.values(item).some(Boolean));
+    if (type === "creator" && !items.length && text && !/^\+\d+$/.test(text)) {
+      const name = text.replace(/\s*ID:\s*@[^\s]+/i, "").trim();
+      if (name) items.push({ avatar: null, name, profile: relatedUrl(cell) });
+    }
+    const additionalCount = relatedCount(text);
+    if (!items.length && !additionalCount) return null;
+    return {
+      [type]: {
+        items,
+        visible_count: items.length,
+        additional_count: additionalCount,
+        source_text: text || null
+      }
+    };
+  };
   const tableCandidates = Array.from(document.querySelectorAll("table"))
     .filter(isVisible)
     .map((table) => {
@@ -537,11 +586,15 @@ function collectPageData() {
       };
     });
     const rankColumnIndex = fieldTemplate.find((field) => field.key === "rank" && field.available)?.column_index;
+    const relatedColumnIndexes = {
+      video: fieldTemplate.find((field) => field.key === "best_video" && field.available)?.column_index,
+      creator: fieldTemplate.find((field) => field.key === "creator" && field.available)?.column_index
+    };
     const records = dataRows.map((row, rowIndex) => {
       const cells = cellDetails(row);
       const productDetails = productColumn?.score ? parseProductDetails(cells[productColumn.index]?.text || "") : null;
       const rowRankParts = rankColumnIndex !== undefined ? rankParts(row.children[rankColumnIndex], rowIndex) : { rank: null, rank_change: null };
-      return Object.fromEntries(fieldTemplate
+      const record = Object.fromEntries(fieldTemplate
         .filter((field) => field.available)
         .map((field) => {
           if (productDetails && field.key === "product_name" && field.column_index === productColumn.index) return [field.label, productDetails.title];
@@ -552,6 +605,12 @@ function collectPageData() {
           if (field.key === "rank_change") return [field.label, rowRankParts.rank_change];
           return [field.label, field.key === "image" ? (cells[field.column_index]?.image || null) : (cells[field.column_index]?.text || "")];
         }));
+      const relatedContent = {
+        ...(relatedColumnIndexes.video !== undefined ? extractRelatedContent(row.children[relatedColumnIndexes.video], "video") : null),
+        ...(relatedColumnIndexes.creator !== undefined ? extractRelatedContent(row.children[relatedColumnIndexes.creator], "creator") : null)
+      };
+      if (Object.keys(relatedContent).length) record["关联内容"] = relatedContent;
+      return record;
     });
     return {
       schema_version: "1.0",
@@ -909,7 +968,8 @@ const projectProductFields = [
   { key: "best_video", label: "表现最佳的视频" },
   { key: "creator", label: "带货达人" },
   { key: "shop", label: "店铺" },
-  { key: "similar_products", label: "同款商品数" }
+  { key: "similar_products", label: "同款商品数" },
+  { key: "related_content", label: "关联内容", value_type: "object" }
 ];
 
 function collectionProjectData(result) {
@@ -929,7 +989,8 @@ function collectionProjectData(result) {
     best_video: record["表现最佳的视频"] ?? null,
     creator: record["带货达人"] ?? null,
     shop: record["店铺"] ?? null,
-    similar_products: record["同款商品数"] ?? null
+    similar_products: record["同款商品数"] ?? null,
+    related_content: record["关联内容"] ?? record.related_content ?? null
   }));
   return {
     metadata: {
@@ -942,6 +1003,10 @@ function collectionProjectData(result) {
     },
     products
   };
+}
+
+function collectionExportValue(value) {
+  return value && typeof value === "object" ? JSON.stringify(value) : value ?? "";
 }
 
 function restoreCollectionSession() {
@@ -1108,7 +1173,7 @@ function collectionXlsx(products, fields = projectProductFields) {
     }
     return archive;
   };
-  const rows = [fields.map((field) => field.key), ...products.map((product) => fields.map((field) => product[field.key] ?? ""))];
+  const rows = [fields.map((field) => field.key), ...products.map((product) => fields.map((field) => collectionExportValue(product[field.key])))];
   const columns = fields.map((field, index) => {
     const longest = Math.max(...rows.map((row) => String(row[index] ?? "").length));
     return `<col min="${index + 1}" max="${index + 1}" width="${Math.min(48, Math.max(10, longest + 2))}" customWidth="1"/>`;
@@ -1145,7 +1210,7 @@ async function writeProjectFile(directory, filename, content) {
 function collectionCsv(products, fields = projectProductFields) {
   const escapeCsv = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`;
   const rows = [fields.map((field) => escapeCsv(field.label)).join(",")];
-  products.forEach((product) => rows.push(fields.map((field) => escapeCsv(product[field.key])).join(",")));
+  products.forEach((product) => rows.push(fields.map((field) => escapeCsv(collectionExportValue(product[field.key]))).join(",")));
   return `\uFEFF${rows.join("\r\n")}\r\n`;
 }
 
