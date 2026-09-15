@@ -11,6 +11,14 @@ function inspectScrollableElements(target = null, limit = 30) {
     }
     return parts.join(" > ");
   };
+  const targetAncestors = new Map();
+  for (let current = target, distance = 0; current; current = current.parentElement, distance += 1) targetAncestors.set(current, distance);
+  const targetDistance = (element) => {
+    for (let current = element, distance = 0; current; current = current.parentElement, distance += 1) {
+      if (targetAncestors.has(current)) return distance + targetAncestors.get(current);
+    }
+    return null;
+  };
   return Array.from(document.querySelectorAll("*")).map((element) => {
     const style = getComputedStyle(element);
     const scrollHeight = element.scrollHeight;
@@ -24,13 +32,15 @@ function inspectScrollableElements(target = null, limit = 30) {
       clientHeight,
       overflow,
       is_scrollable: canScroll,
-      contains_target: Boolean(target && element.contains(target))
+      vertical_overflow: Math.max(0, scrollHeight - clientHeight),
+      target_distance: target ? targetDistance(element) : null
     };
   }).filter((item) => item.is_scrollable)
-    .map((item) => ({ ...item, contains_list_data: Boolean(item.element.querySelector("table, [role='rowgroup'], [role='grid'], [role='list']")) }))
-    .sort((left, right) => Number(right.contains_target) - Number(left.contains_target)
-      || Number(right.contains_list_data) - Number(left.contains_list_data)
-      || right.scrollHeight - left.scrollHeight)
+    .map((item) => ({ ...item, contains_list_data: Boolean(item.element.querySelector("table, [role='rowgroup'], [role='grid'], [role='list'], tr td, [role='row'] [role='cell'], [class*='row'] [class*='cell']")) }))
+    .sort((left, right) => Number(right.contains_list_data) - Number(left.contains_list_data)
+      || Number(right.clientHeight >= 80) - Number(left.clientHeight >= 80)
+      || (left.target_distance ?? Number.MAX_SAFE_INTEGER) - (right.target_distance ?? Number.MAX_SAFE_INTEGER)
+      || right.vertical_overflow - left.vertical_overflow)
     .slice(0, limit);
 }
 
@@ -801,13 +811,14 @@ function findProductOpportunityScrollContainer(detected = detectProductOpportuni
   const table = detected?.table;
   if (!table) return null;
   const cached = window.__crawlHubOpportunityScrollContainer;
-  if (cached instanceof Element && document.documentElement.contains(cached) && cached.contains(table)
+  if (cached instanceof Element && window.__crawlHubOpportunityScrollContainerTarget === table && document.documentElement.contains(cached)
     && cached.scrollHeight > cached.clientHeight + 8) return cached;
   const candidates = inspectScrollableElements(table);
-  const container = candidates.find((item) => item.contains_target && item.contains_list_data)?.element
-    || candidates.find((item) => item.contains_target)?.element
+  const container = candidates.find((item) => item.contains_list_data && item.clientHeight >= 80)?.element
+    || candidates.find((item) => item.clientHeight >= 80)?.element
     || null;
   window.__crawlHubOpportunityScrollContainer = container;
+  window.__crawlHubOpportunityScrollContainerTarget = table;
   return container;
 }
 
