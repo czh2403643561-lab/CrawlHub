@@ -1207,6 +1207,22 @@ const projectProductFields = [
   { key: "selling_products", label: "在售商品" }
 ];
 
+const productOpportunityExportFields = [
+  { key: "keyword", label: "关键词" },
+  { key: "category", label: "类目" },
+  { key: "source", label: "线索来源" },
+  { key: "search_count", label: "搜索次数" },
+  { key: "selling_products", label: "在售商品" }
+];
+
+function collectionExportFields(sourceType) {
+  return sourceType === "product_opportunity" ? productOpportunityExportFields : projectProductFields;
+}
+
+function collectionExportProducts(products, fields) {
+  return products.map((product) => Object.fromEntries(fields.map((field) => [field.key, product[field.key] ?? null])));
+}
+
 function collectionProjectData(result) {
   const metadata = result.metadata || {};
   const products = result.records.map((record) => {
@@ -1569,11 +1585,16 @@ async function exportCollectionProject() {
   const stored = await projectStorageRequest("crawlHub:read-project", { project_id: projectId });
   const project = stored.project;
   if (!project) throw new Error("未找到已保存的项目数据，请重新采集当前页");
+  const sourceType = result.source_type === "product_opportunity"
+    ? result.source_type
+    : project.task?.snapshot?.source_type || project.task?.snapshot?.result?.source_type || result.source_type;
+  const exportFields = collectionExportFields(sourceType);
+  const exportProducts = collectionExportProducts(project.products, exportFields);
   const rootDirectory = await readExportRootDirectory();
   if (!rootDirectory) throw new Error("尚未设置默认导出根目录，请先点击齿轮设置；设置后可通过设置入口修改。");
   if (!(await ensureExportRootPermission(rootDirectory))) throw new Error("默认导出目录权限已失效，请点击齿轮重新设置。");
   const categoryDirectory = await rootDirectory.getDirectoryHandle(categoryDirectoryName(project.metadata), { create: true });
-  const rankDirectoryName = rankingDirectoryName(project.metadata);
+  const rankDirectoryName = sourceType === "product_opportunity" ? "热门关键词" : rankingDirectoryName(project.metadata);
   let collectionDirectory = await findDirectory(categoryDirectory, rankDirectoryName);
   if (collectionDirectory) {
     const confirmed = window.confirm(`发现已有数据：${categoryDirectory.name} / ${collectionDirectory.name}\n是否覆盖该榜单目录中的文件？`);
@@ -1582,10 +1603,11 @@ async function exportCollectionProject() {
     collectionDirectory = await categoryDirectory.getDirectoryHandle(rankDirectoryName, { create: true });
   }
   await writeProjectFile(collectionDirectory, "metadata.json", JSON.stringify(project.metadata, null, 2));
-  await writeProjectFile(collectionDirectory, "products.json", JSON.stringify(project.products, null, 2));
-  await writeProjectFile(collectionDirectory, "products.xlsx", collectionXlsx(project.products));
-  await writeProjectFile(collectionDirectory, "products.csv", collectionCsv(project.products));
-  return { folder_name: `${categoryDirectory.name}/${collectionDirectory.name}`, product_count: project.products.length };
+  const filename = sourceType === "product_opportunity" ? "商品机会_热门关键词" : "products";
+  await writeProjectFile(collectionDirectory, `${filename}.json`, JSON.stringify(exportProducts, null, 2));
+  await writeProjectFile(collectionDirectory, `${filename}.xlsx`, collectionXlsx(exportProducts, exportFields));
+  await writeProjectFile(collectionDirectory, `${filename}.csv`, collectionCsv(exportProducts, exportFields));
+  return { folder_name: `${categoryDirectory.name}/${collectionDirectory.name}`, product_count: exportProducts.length };
 }
 
 function saveCollectionTemplate() {

@@ -16,6 +16,7 @@
 - 页面类型识别已增加 `product_rank` 与 `product_opportunity`：商品机会页面命中关键词、类目、线索来源、搜索次数、在售商品等至少三项表头时切换为“开始、暂停、停止、导出、清除”界面；开始采集会读取 `core-table-tr/core-table-td` 行并保存五项字段，沿真实列表滚动容器每次下移 650px、等待 1.2 秒，连续三次无新增时结束；以“关键词 + 类目”去重，热卖榜保持原有采集流程。
 - 面板打开时会自动识别商品机会页面并切换到数据采集视图；普通用户只看到页面、状态、五个已识别字段与固定操作按钮，调试信息收进“高级信息”折叠区。商品机会任务变化会直接切换并保留旧任务数据。
 - 页面分析的 `structures.scroll_containers` 现会输出真实可滚动元素的 selector、scrollHeight、clientHeight、overflow 与列表包含标记；商品机会采集复用同一判定，以列表结构、有效可视高度、与目标表格的 DOM 距离和滚动高度优先选择容器，不依赖不稳定的 `contains_target` 标记或平台容器 class。
+- 导出按数据来源拆分字段：商品机会的 JSON/XLSX/CSV 仅输出 keyword、category、source、search_count、selling_products，并使用“商品机会_热门关键词”文件名；热卖榜维持原有 `products.*` 文件和字段结构。
 
 ## 当前
 
