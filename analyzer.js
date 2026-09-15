@@ -306,6 +306,8 @@ function analyzePage() {
 }
 
 function collectPageData() {
+  const keywordOpportunityResult = collectKeywordOpportunityData();
+  if (keywordOpportunityResult) return keywordOpportunityResult;
   const compactText = (value, length = 500) => {
     const text = String(value || "").replace(/\s+/g, " ").trim();
     return text.length > length ? `${text.slice(0, length)}…` : text;
@@ -737,6 +739,141 @@ function collectPageData() {
   };
 }
 
+function detectKeywordOpportunityScrollTable() {
+  const compactText = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const normalizeHeader = (value) => compactText(value).toLowerCase().replace(/[\s_\-:/：()（）]/g, "");
+  const isVisible = (element) => {
+    if (!(element instanceof Element)) return false;
+    const style = getComputedStyle(element);
+    return style.display !== "none" && style.visibility !== "hidden" && element.getClientRects().length > 0;
+  };
+  const aliases = {
+    keyword: ["关键词", "keyword"],
+    category: ["类目", "分类", "category"],
+    source: ["线索来源", "来源", "source"],
+    search_count: ["搜索次数", "搜索量", "search count", "search volume"],
+    selling_products: ["在售商品", "在售商品数", "selling products", "listed products"]
+  };
+  const headerIndex = (headers, names) => headers.findIndex((header) => names.some((name) => normalizeHeader(header) === normalizeHeader(name)));
+  const candidates = Array.from(document.querySelectorAll(".core-table-content-scroll"))
+    .filter(isVisible)
+    .map((container) => {
+      const table = container.querySelector("table");
+      const headers = Array.from(table?.querySelectorAll("thead th") || []).map((cell) => compactText(cell.innerText || cell.textContent || ""));
+      const columns = Object.fromEntries(Object.entries(aliases).map(([key, names]) => [key, headerIndex(headers, names)]));
+      const hasRequiredColumns = Object.values(columns).every((index) => index >= 0);
+      const style = getComputedStyle(container);
+      const canScroll = container.scrollHeight > container.clientHeight || /auto|scroll/.test(style.overflowY);
+      return hasRequiredColumns && canScroll ? { container, headers, columns } : null;
+    })
+    .filter(Boolean);
+  return candidates[0] || null;
+}
+
+function collectKeywordOpportunityData() {
+  const table = detectKeywordOpportunityScrollTable();
+  if (!table) return null;
+  const compactText = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const isVisible = (element) => {
+    if (!(element instanceof Element)) return false;
+    const style = getComputedStyle(element);
+    return style.display !== "none" && style.visibility !== "hidden" && element.getClientRects().length > 0;
+  };
+  const metricValue = (value) => {
+    const match = compactText(value).match(/[\d,.]+\s*[万kK]?/);
+    if (!match) return null;
+    const text = match[0].replace(/,/g, "").replace(/\s/g, "");
+    const multiplier = /万$/i.test(text) ? 10000 : /k$/i.test(text) ? 1000 : 1;
+    const number = Number(text.replace(/[万kK]$/i, ""));
+    return Number.isFinite(number) ? number * multiplier : null;
+  };
+  const rows = Array.from(table.container.querySelectorAll(".core-table-body .core-table-tr"))
+    .filter(isVisible);
+  const records = [];
+  const seen = new Set();
+  rows.forEach((row) => {
+    const cells = Array.from(row.children).filter((cell) => cell.classList.contains("core-table-td"));
+    if (!cells.length) return;
+    const value = (key) => compactText(cells[table.columns[key]]?.innerText || cells[table.columns[key]]?.textContent || "");
+    const keyword = value("keyword");
+    const category = value("category");
+    const source = value("source");
+    if (!keyword) return;
+    const recordKey = `${keyword}|${category}|${source}`;
+    if (seen.has(recordKey)) return;
+    seen.add(recordKey);
+    records.push({
+      "关键词": keyword,
+      "类目": category || null,
+      "线索来源": source || null,
+      "搜索次数": metricValue(value("search_count")),
+      "在售商品": metricValue(value("selling_products"))
+    });
+  });
+  const fields = [
+    { key: "keyword", label: "关键词", value_type: "text" },
+    { key: "category", label: "类目", value_type: "text" },
+    { key: "source", label: "线索来源", value_type: "text" },
+    { key: "search_count", label: "搜索次数", value_type: "metric" },
+    { key: "selling_products", label: "在售商品", value_type: "metric" }
+  ];
+  const metadata = {
+    category_full: "商品机会",
+    category_short: "商品机会",
+    category: "商品机会",
+    created_at: new Date().toISOString(),
+    page_title: document.title || "TikTok Shop Seller Center",
+    rank_type: "热门关键词",
+    url: location.href
+  };
+  return {
+    schema_version: "1.0",
+    generated_at: new Date().toISOString(),
+    metadata,
+    local_processing: true,
+    source_type: "scrolling_keyword_table",
+    analysis_basis: { detected_tables: 1, detected_lists: 0 },
+    source_selector: ".core-table-content-scroll",
+    item_count: records.length,
+    raw_columns: fields.map((field) => ({ header: field.label, column_index: table.columns[field.key] })),
+    field_template: fields.map((field) => ({
+      ...field,
+      source_header: table.headers[table.columns[field.key]],
+      column_index: table.columns[field.key],
+      available: true,
+      match_confidence: "high"
+    })),
+    records,
+    preview_records: records.slice(0, 5)
+  };
+}
+
+const waitForScrollLoad = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function collectScrollingKeywordTable(onProgress) {
+  let table = detectKeywordOpportunityScrollTable();
+  if (!table) throw new Error("当前页面未识别到可滚动的热门关键词表格。");
+  let collected = await collectCurrentPage();
+  if (collected.cancelled) return collected;
+  let previousCount = collected.result.item_count;
+  let unchangedRounds = 0;
+  let scrollRounds = 0;
+  while (unchangedRounds < 3) {
+    table = detectKeywordOpportunityScrollTable();
+    if (!table) break;
+    table.container.scrollTop += 650;
+    await waitForScrollLoad(1200);
+    collected = await collectCurrentPage();
+    if (collected.cancelled) return collected;
+    const addedCount = Math.max(0, collected.result.item_count - previousCount);
+    previousCount = collected.result.item_count;
+    unchangedRounds = addedCount ? 0 : unchangedRounds + 1;
+    scrollRounds += 1;
+    if (typeof onProgress === "function") onProgress({ total: previousCount, added: addedCount, unchanged_rounds: unchangedRounds });
+  }
+  return { ...collected, scroll_rounds: scrollRounds, unchanged_rounds: unchangedRounds };
+}
+
 function detectPaginationState() {
   const isVisible = (element) => {
     if (!(element instanceof Element)) return false;
@@ -977,14 +1114,14 @@ async function collectCurrentPage() {
   const seen = new Set();
   const records = [];
   pages.forEach((page) => page.result.records.forEach((record) => {
-    const key = record["排名"] ?? `${record["商品名称"] || ""}|${record["店铺"] || ""}|${record["图片"] || ""}`;
+    const key = record["排名"] ?? (record["关键词"] ? `${record["关键词"]}|${record["类目"] || ""}|${record["线索来源"] || ""}` : `${record["商品名称"] || ""}|${record["店铺"] || ""}|${record["图片"] || ""}`);
     if (seen.has(key)) return;
     seen.add(key);
     records.push(record);
   }));
   const merged = {
     ...result,
-    source_type: pages.length > 1 ? "manual_paginated_table" : result.source_type,
+    source_type: result.source_type === "scrolling_keyword_table" ? result.source_type : pages.length > 1 ? "manual_paginated_table" : result.source_type,
     item_count: records.length,
     records,
     preview_records: records.slice(0, 5),
@@ -1032,7 +1169,12 @@ const projectProductFields = [
   { key: "shop", label: "店铺" },
   { key: "similar_products", label: "同款商品数" },
   { key: "videos", label: "视频", value_type: "object" },
-  { key: "related_content", label: "关联内容", value_type: "object" }
+  { key: "related_content", label: "关联内容", value_type: "object" },
+  { key: "keyword", label: "关键词" },
+  { key: "category", label: "类目" },
+  { key: "source", label: "线索来源" },
+  { key: "search_count", label: "搜索次数" },
+  { key: "selling_products", label: "在售商品" }
 ];
 
 function collectionProjectData(result) {
@@ -1064,7 +1206,12 @@ function collectionProjectData(result) {
     shop: record["店铺"] ?? null,
     similar_products: record["同款商品数"] ?? null,
     videos,
-    related_content: relatedContent
+    related_content: relatedContent,
+    keyword: record["关键词"] ?? null,
+    category: record["类目"] ?? null,
+    source: record["线索来源"] ?? null,
+    search_count: record["搜索次数"] ?? null,
+    selling_products: record["在售商品"] ?? null
     };
   });
   return {
@@ -2054,6 +2201,7 @@ function installPanel() {
           </div>
           <div class="actions collection-actions" style="margin-top: 7px;">
             <button id="collectCollection">采集当前页</button>
+            <button id="collectScrollKeywords" class="secondary" hidden>滚动采集关键词</button>
             <button id="pauseCollectionTask" class="secondary" hidden>暂停采集</button>
             <button id="cancelCollectionTask" class="secondary" hidden>取消当前任务</button>
             <button id="exportProject" class="secondary">导出项目</button>
@@ -2083,6 +2231,7 @@ function installPanel() {
   const collectionPreviewTable = shadow.querySelector("#collectionPreviewTable");
   const templateStatus = shadow.querySelector("#templateStatus");
   const collectCollectionButton = shadow.querySelector("#collectCollection");
+  const collectScrollKeywordsButton = shadow.querySelector("#collectScrollKeywords");
   const pauseCollectionTaskButton = shadow.querySelector("#pauseCollectionTask");
   const cancelCollectionTaskButton = shadow.querySelector("#cancelCollectionTask");
   const exportProjectButton = shadow.querySelector("#exportProject");
@@ -2165,6 +2314,9 @@ function installPanel() {
     const result = window.__crawlHubCollectionPreview;
     const manualState = window.__crawlHubManualCollectionState;
     const activeTask = window.__crawlHubActiveTask;
+    const keywordScrollTable = detectKeywordOpportunityScrollTable();
+    collectScrollKeywordsButton.hidden = !keywordScrollTable;
+    collectScrollKeywordsButton.disabled = Boolean(window.__crawlHubCollectionBusy) || activeTask?.status === "paused";
     const taskStatusLabel = activeTask?.status === "paused" ? "已暂停" : activeTask?.status === "cancelled" ? "已结束" : "采集中";
     taskStatus.textContent = activeTask
       ? `当前任务：${activeTask.label} · ${taskStatusLabel} · 已采集${activeTask.collected_count || result?.item_count || 0}条`
@@ -2176,7 +2328,9 @@ function installPanel() {
     cancelCollectionTaskButton.disabled = Boolean(window.__crawlHubCollectionBusy);
     const fieldTemplate = result?.field_template || window.__crawlHubCollectionFieldTemplate || [];
     const pageState = detectPaginationState();
-    const pageText = pageState.current_page && pageState.total_pages
+    const pageText = keywordScrollTable
+      ? "采集模式：滚动加载（表格容器）"
+      : pageState.current_page && pageState.total_pages
       ? `当前：第${pageState.current_page}页 / ${pageState.total_pages}页`
       : "分页状态：未识别";
     paginationStatus.textContent = pageText;
@@ -2196,7 +2350,7 @@ function installPanel() {
       clearCollectionDataButton.disabled = true;
       return;
     }
-    const sourceLabel = result.source_type === "table" ? "表格" : result.source_type === "list" ? "列表" : result.source_type === "paginated_table" || result.source_type === "manual_paginated_table" ? "分页表格" : result.source_type === "restored_session" ? "已恢复项目" : "未找到可提取的表格或列表";
+    const sourceLabel = result.source_type === "table" ? "表格" : result.source_type === "list" ? "列表" : result.source_type === "scrolling_keyword_table" ? "滚动关键词表格" : result.source_type === "paginated_table" || result.source_type === "manual_paginated_table" ? "分页表格" : result.source_type === "restored_session" ? "已恢复项目" : "未找到可提取的表格或列表";
     collectionState.textContent = manualState?.last_page
       ? `✓ 第${manualState.last_page}页完成 · 已采集${result.item_count}条 · 已保存到本地项目${manualState.duplicate ? "（本页已采集，未重复计数）" : ""}`
       : `${sourceLabel} · 当前页商品/条目数量：${result.item_count}`;
@@ -2357,6 +2511,39 @@ function installPanel() {
       renderCollection();
     }
   });
+  collectScrollKeywordsButton.addEventListener("click", async () => {
+    if (window.__crawlHubActiveTask?.status === "paused") {
+      setMessage("当前任务已暂停，请先点击“继续采集”。", "error");
+      return;
+    }
+    try {
+      setMessage("正在检查页面连接…");
+      try {
+        await checkExtensionConnection();
+      } catch {
+        await reconnectPage();
+        return;
+      }
+      window.__crawlHubCollectionBusy = true;
+      renderCollection();
+      setMessage("滚动采集中：正在读取当前可见关键词…");
+      const collected = await collectScrollingKeywordTable(({ total, added, unchanged_rounds }) => {
+        setMessage(added ? `滚动采集中：新增 ${added} 条，累计 ${total} 条。` : `滚动采集中：暂未发现新行（${unchanged_rounds}/3）。`);
+      });
+      if (collected.cancelled) {
+        renderCollection();
+        setMessage("已取消滚动采集，原采集结果保留。", "success");
+        return;
+      }
+      renderCollection();
+      setMessage(`✓ 滚动采集完成：累计 ${collected.result.item_count} 条关键词。`, "success");
+    } catch (error) {
+      setMessage(`滚动采集失败：${error.message || "无法读取当前表格"}`, "error");
+    } finally {
+      window.__crawlHubCollectionBusy = false;
+      renderCollection();
+    }
+  });
   pauseCollectionTaskButton.addEventListener("click", async () => {
     const task = window.__crawlHubActiveTask;
     if (!task) return;
@@ -2463,7 +2650,7 @@ function installPanel() {
   return { started: true, already_open: false };
 }
 
-window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, collectCurrentPage, clearCollectionData, collectionCsv, collectionXlsx, collectionProjectData, exportCollectionProject, saveCollectionTemplate, startNetworkObserver, startElementSampling, pauseElementSampling, resumeElementSampling, cancelElementSampling, stopElementSampling, installPanel };
+window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, detectKeywordOpportunityScrollTable, collectCurrentPage, collectScrollingKeywordTable, clearCollectionData, collectionCsv, collectionXlsx, collectionProjectData, exportCollectionProject, saveCollectionTemplate, startNetworkObserver, startElementSampling, pauseElementSampling, resumeElementSampling, cancelElementSampling, stopElementSampling, installPanel };
 
 restoreCollectionSession();
 try {
