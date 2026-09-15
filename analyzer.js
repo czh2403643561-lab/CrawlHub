@@ -761,6 +761,21 @@ function detectCollectionPageType() {
   return detectProductOpportunityTable() ? "product_opportunity" : "product_rank";
 }
 
+function findProductOpportunityScrollContainer(detected = detectProductOpportunityTable()) {
+  const table = detected?.table;
+  if (!table) return null;
+  const isScrollable = (element) => {
+    if (!(element instanceof Element)) return false;
+    const style = getComputedStyle(element);
+    return element.scrollHeight > element.clientHeight + 8 && /auto|scroll|overlay/.test(style.overflowY);
+  };
+  for (let element = table.parentElement, depth = 0; element && depth < 10; element = element.parentElement, depth += 1) {
+    if (isScrollable(element)) return element;
+  }
+  return Array.from(document.querySelectorAll(".core-table-content-scroll"))
+    .find((element) => element.contains(table) && isScrollable(element)) || null;
+}
+
 function collectProductOpportunityData() {
   const detected = detectProductOpportunityTable();
   if (!detected) throw new Error("当前页面未识别到商品机会字段。");
@@ -787,7 +802,7 @@ function collectProductOpportunityData() {
     const number = Number(text.replace(/[万kK]$/i, ""));
     return Number.isFinite(number) ? number * multiplier : null;
   };
-  const container = detected.table.closest(".core-table-content-scroll") || detected.table.parentElement;
+  const container = findProductOpportunityScrollContainer(detected) || detected.table.parentElement;
   const rows = Array.from(container?.querySelectorAll(".core-table-tr") || [])
     .filter(isVisible)
     .filter((row) => row.querySelector(":scope > .core-table-td"));
@@ -798,7 +813,7 @@ function collectProductOpportunityData() {
     const keyword = value("keyword");
     const category = value("category");
     const source = value("source");
-    const recordKey = `${keyword}|${category}|${source}`;
+    const recordKey = `${keyword}|${category}`;
     if (!keyword || seen.has(recordKey)) return [];
     seen.add(recordKey);
     return [{
@@ -1083,7 +1098,7 @@ async function collectCurrentPage() {
   const seen = new Set();
   const records = [];
   pages.forEach((page) => page.result.records.forEach((record) => {
-    const key = record["排名"] ?? (record["关键词"] ? `${record["关键词"]}|${record["类目"] || ""}|${record["线索来源"] || ""}` : `${record["商品名称"] || ""}|${record["店铺"] || ""}|${record["图片"] || ""}`);
+    const key = record["排名"] ?? (record["关键词"] ? `${record["关键词"]}|${record["类目"] || ""}` : `${record["商品名称"] || ""}|${record["店铺"] || ""}|${record["图片"] || ""}`);
     if (seen.has(key)) return;
     seen.add(key);
     records.push(record);
@@ -2231,6 +2246,7 @@ function installPanel() {
   const analyzeButton = shadow.querySelector("#analyze");
   const message = shadow.querySelector("#message");
   let opportunityCollectionState = "idle";
+  let opportunityCollectionCount = 0;
   let previousCollectionPageType = null;
   const header = shadow.querySelector("header");
   const dragState = { active: false, offsetX: 0, offsetY: 0, htmlUserSelect: "", bodyUserSelect: "" };
@@ -2301,7 +2317,11 @@ function installPanel() {
     const pageType = detectCollectionPageType();
     const isOpportunity = pageType === "product_opportunity";
     const opportunityStateLabel = opportunityCollectionState === "active" ? "采集中" : opportunityCollectionState === "paused" ? "已暂停" : opportunityCollectionState === "completed" ? "已完成" : opportunityCollectionState === "stopped" ? "已停止" : "待开始";
-    const opportunityUserState = opportunityCollectionState === "active" ? "正在采集" : opportunityCollectionState === "completed" ? "已完成" : "等待采集";
+    const opportunityUserState = opportunityCollectionState === "active"
+      ? `正在滚动采集 · 已采集 ${opportunityCollectionCount} 条`
+      : opportunityCollectionState === "completed"
+      ? `采集完成 · 总数量 ${opportunityCollectionCount} 条`
+      : "等待采集";
     opportunitySummary.hidden = !isOpportunity;
     collectionTitle.hidden = isOpportunity;
     collectionHint.hidden = isOpportunity;
@@ -2320,10 +2340,10 @@ function installPanel() {
       : "当前任务：未创建";
     pauseCollectionTaskButton.hidden = isOpportunity ? false : !activeTask || activeTask.status === "cancelled";
     pauseCollectionTaskButton.textContent = isOpportunity ? opportunityCollectionState === "paused" ? "继续采集" : "暂停" : activeTask?.status === "paused" ? "继续采集" : "暂停采集";
-    pauseCollectionTaskButton.disabled = Boolean(window.__crawlHubCollectionBusy) || (isOpportunity && !["active", "paused"].includes(opportunityCollectionState));
+    pauseCollectionTaskButton.disabled = isOpportunity ? !["active", "paused"].includes(opportunityCollectionState) : Boolean(window.__crawlHubCollectionBusy);
     cancelCollectionTaskButton.hidden = isOpportunity ? false : !activeTask || activeTask.status === "cancelled";
     cancelCollectionTaskButton.textContent = isOpportunity ? "停止" : "取消当前任务";
-    cancelCollectionTaskButton.disabled = Boolean(window.__crawlHubCollectionBusy) || (isOpportunity && !["active", "paused"].includes(opportunityCollectionState));
+    cancelCollectionTaskButton.disabled = isOpportunity ? !["active", "paused"].includes(opportunityCollectionState) : Boolean(window.__crawlHubCollectionBusy);
     const fieldTemplate = result?.field_template || (isOpportunity ? [] : window.__crawlHubCollectionFieldTemplate || []);
     const pageState = detectPaginationState();
     const pageText = isOpportunity
@@ -2333,10 +2353,10 @@ function installPanel() {
       : "分页状态：未识别";
     paginationStatus.textContent = pageText;
     if (!result) {
-      collectionState.textContent = isOpportunity ? `商品机会模式：${opportunityStateLabel}（仅采集当前可见数据）` : "尚未采集";
+      collectionState.textContent = isOpportunity ? `商品机会模式：${opportunityStateLabel}（自动滚动采集）` : "尚未采集";
       metadataStatus.textContent = isOpportunity ? "页面识别：product_opportunity（关键词表头已匹配）" : "metadata：采集当前页时自动读取页面信息";
       renderFieldTemplate(fieldTemplate);
-      collectionPreviewTable.textContent = isOpportunity ? "已识别商品机会页面；点击“开始采集”读取当前可见关键词，不会自动滚动。" : fieldTemplate.length ? "字段模板已保留，点击“采集当前页”生成新结果。" : "点击“采集当前页”查看示例数据。";
+      collectionPreviewTable.textContent = isOpportunity ? "已识别商品机会页面；点击“开始采集”将自动滚动并采集关键词。" : fieldTemplate.length ? "字段模板已保留，点击“采集当前页”生成新结果。" : "点击“采集当前页”查看示例数据。";
       try {
         templateStatus.textContent = localStorage.getItem("crawlHub.collectionTemplate.v1") ? "已有本地保存的字段模板" : fieldTemplate.length ? "当前字段模板已保留，尚未保存" : "字段模板尚未保存";
       } catch {
@@ -2350,7 +2370,7 @@ function installPanel() {
     }
     const sourceLabel = result.source_type === "product_opportunity" ? "商品机会当前页" : result.source_type === "table" ? "表格" : result.source_type === "list" ? "列表" : result.source_type === "paginated_table" || result.source_type === "manual_paginated_table" ? "分页表格" : result.source_type === "restored_session" ? "已恢复项目" : "未找到可提取的表格或列表";
     collectionState.textContent = isOpportunity
-      ? `✓ 当前可见关键词已采集 ${result.item_count} 条`
+      ? `✓ 商品机会已采集 ${result.item_count} 条`
       : manualState?.last_page
       ? `✓ 第${manualState.last_page}页完成 · 已采集${result.item_count}条 · 已保存到本地项目${manualState.duplicate ? "（本页已采集，未重复计数）" : ""}`
       : `${sourceLabel} · 当前页商品/条目数量：${result.item_count}`;
@@ -2421,6 +2441,7 @@ function installPanel() {
     if (!currentTask || currentTask.task_id === nextTask.task_id) return;
     await activateCollectionTask(nextTask, metadata);
     opportunityCollectionState = "idle";
+    opportunityCollectionCount = 0;
     renderCollection();
     setMessage("已创建商品机会采集任务，等待开始。", "success");
   };
@@ -2474,7 +2495,7 @@ function installPanel() {
   analysisModeButton.addEventListener("click", () => setMode("analysis"));
   collectionModeButton.addEventListener("click", () => {
     setMode("collection");
-    setMessage(detectCollectionPageType() === "product_opportunity" ? "已识别商品机会页面，可采集当前可见关键词；不会自动滚动。" : "可提取当前页已加载的数据；不会翻页或发送页面数据。", "success");
+    setMessage(detectCollectionPageType() === "product_opportunity" ? "已识别商品机会页面，可开始自动滚动采集。" : "可提取当前页已加载的数据；不会翻页或发送页面数据。", "success");
   });
   exportSettingsButton.addEventListener("click", async () => {
     try {
@@ -2503,13 +2524,39 @@ function installPanel() {
           return;
         }
         opportunityCollectionState = "active";
+        opportunityCollectionCount = window.__crawlHubCollectionPreview?.item_count || 0;
         window.__crawlHubCollectionBusy = true;
         renderCollection();
-        setMessage("正在采集当前可见关键词…");
-        const collected = await collectCurrentPage();
+        setMessage(`正在滚动采集，已采集 ${opportunityCollectionCount} 条…`);
+        let collected = await collectCurrentPage();
+        opportunityCollectionCount = collected.result.item_count;
+        renderCollection();
+        const scrollContainer = findProductOpportunityScrollContainer();
+        if (!scrollContainer) throw new Error("未找到商品机会列表的可滚动容器。");
+        const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+        const canContinue = async () => {
+          while (opportunityCollectionState === "paused") await wait(250);
+          return opportunityCollectionState !== "stopped";
+        };
+        let unchangedScrolls = 0;
+        while (unchangedScrolls < 3 && await canContinue()) {
+          const countBeforeScroll = opportunityCollectionCount;
+          scrollContainer.scrollTop += 650;
+          setMessage(`正在滚动采集，已采集 ${countBeforeScroll} 条…`);
+          await wait(1200);
+          if (!await canContinue()) break;
+          collected = await collectCurrentPage();
+          opportunityCollectionCount = collected.result.item_count;
+          unchangedScrolls = opportunityCollectionCount > countBeforeScroll ? 0 : unchangedScrolls + 1;
+          renderCollection();
+        }
+        if (opportunityCollectionState === "stopped") {
+          setMessage(`商品机会采集已停止，已采集 ${opportunityCollectionCount} 条。`, "success");
+          return;
+        }
         opportunityCollectionState = "completed";
         renderCollection();
-        setMessage(collected.duplicate ? "✓ 当前可见数据已采集过，未重复计数。" : `✓ 当前可见关键词采集完成：${collected.result.item_count} 条，已保存到本地项目。`, "success");
+        setMessage(`✓ 商品机会采集完成：共 ${opportunityCollectionCount} 条，已保存到本地项目。`, "success");
       } catch (error) {
         opportunityCollectionState = "stopped";
         setMessage(`商品机会采集失败：${error.message || "无法读取当前可见数据"}`, "error");
@@ -2606,7 +2653,10 @@ function installPanel() {
     const confirmed = window.confirm("确认清除当前采集结果？\n\n将删除：\n- 已采集数据\n- 当前进度\n\n不会删除字段模板。");
     if (!confirmed) return;
     clearCollectionData();
-    if (detectCollectionPageType() === "product_opportunity") opportunityCollectionState = "idle";
+    if (detectCollectionPageType() === "product_opportunity") {
+      opportunityCollectionState = "idle";
+      opportunityCollectionCount = 0;
+    }
     renderCollection();
     setMessage("采集数据已清除，字段模板已保留。", "success");
   });
