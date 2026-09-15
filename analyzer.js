@@ -837,7 +837,7 @@ function normalizeOpportunityText(value) {
 }
 
 function normalizeOpportunityKeyword(value) {
-  return compactOpportunityText(value).toLowerCase().replace(/^#\s*/, "");
+  return compactOpportunityText(value);
 }
 
 function isTrendingKeywordsOpportunityPage() {
@@ -860,12 +860,6 @@ function isTrendingKeywordsOpportunityPage() {
   return isOpportunityRoute && (selectedByUrl || selectedByTab);
 }
 
-function productOpportunityColumnIndexes(detected) {
-  const keyword = detected.headers.findIndex((header) => normalizeOpportunityText(header) === normalizeOpportunityText("关键词"));
-  const action = detected.headers.findIndex((header) => normalizeOpportunityText(header) === normalizeOpportunityText("操作"));
-  return { keyword, action };
-}
-
 function productOpportunityRows(detected, container = findProductOpportunityScrollContainer(detected)) {
   if (!container) return [];
   const expectedColumns = detected.headers.length;
@@ -877,85 +871,60 @@ function productOpportunityRows(detected, container = findProductOpportunityScro
     });
 }
 
-function findVisibleProductOpportunityRow(detected, keyword, container) {
-  const { keyword: keywordColumn } = productOpportunityColumnIndexes(detected);
-  if (keywordColumn < 0) return null;
-  const wanted = normalizeOpportunityKeyword(keyword);
-  return productOpportunityRows(detected, container).find((row) => {
-    const cells = Array.from(row.children).filter(isVisiblePageElement);
-    return normalizeOpportunityKeyword(cells[keywordColumn]?.innerText || cells[keywordColumn]?.textContent || "") === wanted;
-  }) || null;
-}
-
 function waitForPageUpdate(milliseconds = 180) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function locateProductOpportunityKeywordRow(keyword) {
+function scanProductOpportunityBindingIndex() {
   const detected = detectProductOpportunityTable();
   if (!isTrendingKeywordsOpportunityPage() || !detected) throw new Error("请先打开 TikTok 商品机会的“热门关键词”页面。");
   const container = findProductOpportunityScrollContainer(detected);
   if (!container) throw new Error("未找到热门关键词列表的可滚动区域。");
-  let row = findVisibleProductOpportunityRow(detected, keyword, container);
-  if (row) return { detected, container, row };
-
-  const originalScrollTop = container.scrollTop;
-  container.scrollTop = 0;
-  await waitForPageUpdate();
-  const step = Math.max(240, Math.floor(container.clientHeight * 0.8));
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    row = findVisibleProductOpportunityRow(detected, keyword, container);
-    if (row) return { detected, container, row };
-    const current = container.scrollTop;
-    const next = Math.min(current + step, Math.max(0, container.scrollHeight - container.clientHeight));
-    if (next <= current) break;
-    container.scrollTop = next;
-    await waitForPageUpdate();
-  }
-  container.scrollTop = originalScrollTop;
-  await waitForPageUpdate();
-  throw new Error(`未找到关键词“${compactOpportunityText(keyword)}”。`);
+  const { keyword: keywordColumn, category: categoryColumn } = {
+    keyword: detected.headers.findIndex((header) => normalizeOpportunityText(header) === normalizeOpportunityText("关键词")),
+    category: detected.headers.findIndex((header) => normalizeOpportunityText(header) === normalizeOpportunityText("类目"))
+  };
+  if (keywordColumn < 0) throw new Error("当前页面未找到关键词列。");
+  const entries = productOpportunityRows(detected, container).flatMap((row, rowIndex) => {
+    const cells = Array.from(row.children).filter(isVisiblePageElement);
+    const keyword = compactOpportunityText(cells[keywordColumn]?.innerText || cells[keywordColumn]?.textContent || "");
+    if (!keyword) return [];
+    return [{
+      keyword,
+      normalized_keyword: normalizeOpportunityKeyword(keyword),
+      category: categoryColumn >= 0 ? compactOpportunityText(cells[categoryColumn]?.innerText || cells[categoryColumn]?.textContent || "") : "",
+      row,
+      row_index: rowIndex,
+      container
+    }];
+  });
+  window.__crawlHubBindingSession = {
+    state: "completed",
+    entries,
+    loaded_count: entries.length,
+    scanned_at: Date.now()
+  };
+  return window.__crawlHubBindingSession;
 }
 
-function findProductOpportunityMenuTrigger(row, detected) {
-  const { action: actionColumn } = productOpportunityColumnIndexes(detected);
-  const cells = Array.from(row.children).filter(isVisiblePageElement);
-  const actionCell = actionColumn >= 0 ? cells[actionColumn] : null;
-  if (!actionCell) return null;
-  const controls = Array.from(actionCell.querySelectorAll("button, [role='button'], [tabindex]"))
-    .filter(isVisiblePageElement);
-  return controls.find((control) => /^(?:\.{3}|…|⋯)$/.test(compactOpportunityText(control.innerText || control.textContent || "")))
-    || controls.find((control) => /更多|more|menu|action|ellipsis|三点/i.test([
-      control.getAttribute("aria-label"), control.getAttribute("title"), control.getAttribute("data-tooltip"), control.innerText, control.textContent
-    ].join(" ")))
-    || controls.find((control) => !compactOpportunityText(control.innerText || control.textContent || "") && Boolean(control.querySelector("svg, img")))
-    || null;
-}
-
-function findVisibleBindingMenuItem() {
-  const matches = Array.from(document.body?.querySelectorAll("*") || [])
-    .filter(isVisiblePageElement)
-    .filter((element) => compactOpportunityText(element.innerText || element.textContent || "") === "绑定现有商品")
-    .filter((element) => !Array.from(element.children).some((child) => compactOpportunityText(child.innerText || child.textContent || "") === "绑定现有商品"));
-  const item = matches[0] || null;
-  return item?.closest("button, [role='menuitem'], [role='button'], [tabindex]") || item;
-}
-
-async function openExistingProductBinding(keyword) {
-  const located = await locateProductOpportunityKeywordRow(keyword);
-  located.row.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" });
+async function locateProductOpportunityKeyword(keyword) {
+  const session = window.__crawlHubBindingSession;
+  if (!session || session.state !== "completed") throw new Error("请先扫描商品机会。");
+  const normalizedKeyword = normalizeOpportunityKeyword(keyword);
+  const entry = session.entries.find((item) => item.normalized_keyword === normalizedKeyword);
+  if (!entry) throw new Error("未找到该商品机会关键词。");
+  if (!document.documentElement.contains(entry.row)) throw new Error("页面内容已变化，请重新扫描商品机会。");
+  entry.row.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" });
   await waitForPageUpdate(80);
-  const trigger = findProductOpportunityMenuTrigger(located.row, located.detected);
-  if (!trigger) throw new Error("未在该关键词行的操作区域找到三点菜单。");
-  trigger.click();
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    await waitForPageUpdate(100);
-    const menuItem = findVisibleBindingMenuItem();
-    if (!menuItem) continue;
-    menuItem.click();
-    return { keyword: compactOpportunityText(keyword) };
+  const rowRect = entry.row.getBoundingClientRect();
+  const containerRect = entry.container.getBoundingClientRect();
+  if (rowRect.top < containerRect.top || rowRect.bottom > containerRect.bottom) {
+    entry.container.scrollTop += rowRect.top < containerRect.top
+      ? rowRect.top - containerRect.top
+      : rowRect.bottom - containerRect.bottom;
+    await waitForPageUpdate(80);
   }
-  throw new Error("三点菜单已打开，但未找到“绑定现有商品”。");
+  return entry;
 }
 
 function collectProductOpportunityData() {
@@ -2406,7 +2375,9 @@ function installPanel() {
       .binding-card { border-radius: 7px; padding: 10px; background: #fff; color: #475467; }
       .binding-card p { margin: 6px 0 10px; }
       .binding-input { width: 100%; border: 1px solid #d0d5dd; border-radius: 6px; padding: 8px; color: #172033; background: #fff; font: inherit; }
-      .binding-status { min-height: 18px; margin-top: 9px; color: #667085; font-size: 12px; }
+      .binding-count, .binding-status { min-height: 18px; margin-top: 9px; color: #667085; font-size: 12px; }
+      .binding-search { margin-top: 12px; padding-top: 12px; border-top: 1px solid #eaecf0; }
+      .binding-search[hidden] { display: none; }
       .view[hidden], .content[hidden] { display: none; }
     </style>
     <div class="panel">
@@ -2460,11 +2431,16 @@ function installPanel() {
         </div>
         <div id="bindingView" class="view" hidden>
           <div class="binding-card">
-            <strong>绑定现有商品</strong>
-            <p>输入热门关键词后，打开该行的绑定入口；不会搜索、选择或提交商品。</p>
-            <input id="bindingKeyword" class="binding-input" type="text" autocomplete="off" placeholder="请输入关键词，例如 matt phone case" />
-            <div class="actions" style="margin-top: 9px;"><button id="openBinding" type="button">定位并打开</button></div>
-            <div id="bindingStatus" class="binding-status">仅适用于 TikTok 商品机会 - 热门关键词页面。</div>
+            <strong>商品绑定</strong>
+            <p>扫描商品机会后，可快速定位对应关键词。</p>
+            <div id="bindingScanState" class="binding-status">尚未扫描</div>
+            <div id="bindingLoaded" class="binding-count" hidden>已加载：0</div>
+            <div class="actions" style="margin-top: 9px;"><button id="scanBinding" type="button">扫描商品机会</button></div>
+            <div id="bindingSearch" class="binding-search" hidden>
+              <input id="bindingKeyword" class="binding-input" type="text" autocomplete="off" placeholder="请输入完整关键词" />
+              <div class="actions" style="margin-top: 9px;"><button id="locateBinding" type="button">定位</button></div>
+              <div id="bindingLocateState" class="binding-status"></div>
+            </div>
           </div>
         </div>
         <div id="message" class="message"></div>
@@ -2483,8 +2459,12 @@ function installPanel() {
   const collectionModeButton = shadow.querySelector("#collectionMode");
   const bindingModeButton = shadow.querySelector("#bindingMode");
   const bindingKeywordInput = shadow.querySelector("#bindingKeyword");
-  const openBindingButton = shadow.querySelector("#openBinding");
-  const bindingStatus = shadow.querySelector("#bindingStatus");
+  const bindingScanButton = shadow.querySelector("#scanBinding");
+  const bindingScanState = shadow.querySelector("#bindingScanState");
+  const bindingLoaded = shadow.querySelector("#bindingLoaded");
+  const bindingSearch = shadow.querySelector("#bindingSearch");
+  const bindingLocateButton = shadow.querySelector("#locateBinding");
+  const bindingLocateState = shadow.querySelector("#bindingLocateState");
   const collectionTitle = shadow.querySelector("#collectionTitle");
   const collectionHint = shadow.querySelector("#collectionHint");
   const rankSummary = shadow.querySelector("#rankSummary");
@@ -2520,7 +2500,8 @@ function installPanel() {
   const message = shadow.querySelector("#message");
   let opportunityCollectionState = "idle";
   let opportunityCollectionCount = 0;
-  let bindingBusy = false;
+  let bindingScanBusy = false;
+  let bindingLocateBusy = false;
   let previousCollectionPageType = null;
   const header = shadow.querySelector("header");
   const dragState = { active: false, offsetX: 0, offsetY: 0, htmlUserSelect: "", bodyUserSelect: "" };
@@ -2715,6 +2696,34 @@ function installPanel() {
     saveCollectionTemplateButton.disabled = !result.field_template.length;
     clearCollectionDataButton.disabled = false;
   };
+  const renderBinding = () => {
+    const session = window.__crawlHubBindingSession;
+    bindingScanButton.disabled = bindingScanBusy;
+    bindingLocateButton.disabled = bindingLocateBusy;
+    if (!session) {
+      bindingScanState.textContent = "尚未扫描";
+      bindingLoaded.hidden = true;
+      bindingSearch.hidden = true;
+      return;
+    }
+    if (session.state === "scanning") {
+      bindingScanState.textContent = "正在扫描商品机会...";
+      bindingLoaded.hidden = false;
+      bindingLoaded.textContent = `已加载：${session.loaded_count || 0}`;
+      bindingSearch.hidden = true;
+      return;
+    }
+    if (session.state === "error") {
+      bindingScanState.textContent = session.error || "暂时无法扫描商品机会。";
+      bindingLoaded.hidden = true;
+      bindingSearch.hidden = true;
+      return;
+    }
+    bindingScanState.textContent = "扫描完成";
+    bindingLoaded.hidden = false;
+    bindingLoaded.textContent = `已发现：${session.loaded_count} 个商品机会`;
+    bindingSearch.hidden = false;
+  };
   const reconnectPage = async () => {
     setMessage("正在检查页面连接…");
     try {
@@ -2755,6 +2764,7 @@ function installPanel() {
     if (!isAnalysis && window.__crawlHubSamplingActive) stopElementSampling();
     render();
     renderCollection();
+    renderBinding();
   };
   const render = () => {
     const selected = Array.isArray(window.__crawlHubSelectedElements) ? window.__crawlHubSelectedElements : [];
@@ -2797,28 +2807,42 @@ function installPanel() {
   });
   bindingModeButton.addEventListener("click", () => {
     setMode("binding");
-    bindingStatus.textContent = isTrendingKeywordsOpportunityPage()
-      ? "已识别热门关键词页面，输入关键词后即可定位。"
-      : "请先打开 TikTok 商品机会 - 热门关键词页面。";
   });
-  openBindingButton.addEventListener("click", async () => {
+  bindingScanButton.addEventListener("click", async () => {
+    if (bindingScanBusy) return;
+    bindingScanBusy = true;
+    bindingKeywordInput.value = "";
+    bindingLocateState.textContent = "";
+    window.__crawlHubBindingSession = { state: "scanning", entries: [], loaded_count: 0 };
+    renderBinding();
+    await waitForPageUpdate(0);
+    try {
+      scanProductOpportunityBindingIndex();
+    } catch (error) {
+      window.__crawlHubBindingSession = { state: "error", entries: [], loaded_count: 0, error: error.message || "暂时无法扫描商品机会。" };
+    } finally {
+      bindingScanBusy = false;
+      renderBinding();
+    }
+  });
+  bindingLocateButton.addEventListener("click", async () => {
     const keyword = compactOpportunityText(bindingKeywordInput.value);
     if (!keyword) {
-      bindingStatus.textContent = "请先输入关键词。";
+      bindingLocateState.textContent = "请输入关键词。";
       return;
     }
-    if (bindingBusy) return;
-    bindingBusy = true;
-    openBindingButton.disabled = true;
-    bindingStatus.textContent = `正在定位“${keyword}”…`;
+    if (bindingLocateBusy) return;
+    bindingLocateBusy = true;
+    bindingLocateState.textContent = "正在定位...";
+    renderBinding();
     try {
-      await openExistingProductBinding(keyword);
-      bindingStatus.textContent = `已打开“${keyword}”的“绑定现有商品”入口，请继续手动操作。`;
+      const entry = await locateProductOpportunityKeyword(keyword);
+      bindingLocateState.textContent = entry.category ? `已定位：${entry.keyword}（${entry.category}）` : `已定位：${entry.keyword}`;
     } catch (error) {
-      bindingStatus.textContent = error.message || "无法打开绑定入口。";
+      bindingLocateState.textContent = error.message || "未找到该商品机会关键词。";
     } finally {
-      bindingBusy = false;
-      openBindingButton.disabled = false;
+      bindingLocateBusy = false;
+      renderBinding();
     }
   });
   exportSettingsButton.addEventListener("click", async () => {
@@ -3050,7 +3074,7 @@ function installPanel() {
   return { started: true, already_open: false };
 }
 
-window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, detectProductOpportunityTable, detectCollectionPageType, collectProductOpportunityData, locateProductOpportunityKeywordRow, openExistingProductBinding, isTrendingKeywordsOpportunityPage, collectCurrentPage, clearCollectionData, collectionCsv, collectionXlsx, collectionProjectData, exportCollectionProject, saveCollectionTemplate, startNetworkObserver, startElementSampling, pauseElementSampling, resumeElementSampling, cancelElementSampling, stopElementSampling, installPanel };
+window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, detectProductOpportunityTable, detectCollectionPageType, collectProductOpportunityData, scanProductOpportunityBindingIndex, locateProductOpportunityKeyword, isTrendingKeywordsOpportunityPage, collectCurrentPage, clearCollectionData, collectionCsv, collectionXlsx, collectionProjectData, exportCollectionProject, saveCollectionTemplate, startNetworkObserver, startElementSampling, pauseElementSampling, resumeElementSampling, cancelElementSampling, stopElementSampling, installPanel };
 
 restoreCollectionSession();
 try {
