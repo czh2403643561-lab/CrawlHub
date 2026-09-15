@@ -837,7 +837,7 @@ function normalizeOpportunityText(value) {
 }
 
 function normalizeOpportunityKeyword(value) {
-  return compactOpportunityText(value);
+  return compactOpportunityText(value).replace(/^#\s*/, "").toLowerCase();
 }
 
 function isTrendingKeywordsOpportunityPage() {
