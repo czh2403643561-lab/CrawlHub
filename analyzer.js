@@ -883,20 +883,46 @@ function waitForPageUpdate(milliseconds = 180) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+async function waitForProductOpportunityScrollStability(container, {
+  minWait = 300,
+  maxWait = 3000,
+  pollWait = 180,
+  stablePollsRequired = 2
+} = {}) {
+  let observedScrollTop = container.scrollTop;
+  let observedScrollHeight = container.scrollHeight;
+  let elapsed = 0;
+  let stablePolls = 0;
+  while (elapsed < maxWait) {
+    await waitForPageUpdate(pollWait);
+    elapsed += pollWait;
+    const scrollChanged = Math.abs(container.scrollTop - observedScrollTop) > 2;
+    const heightChanged = Math.abs(container.scrollHeight - observedScrollHeight) > 2;
+    if (scrollChanged || heightChanged) {
+      observedScrollTop = container.scrollTop;
+      observedScrollHeight = container.scrollHeight;
+      stablePolls = 0;
+      continue;
+    }
+    stablePolls += 1;
+    if (elapsed >= minWait && stablePolls >= stablePollsRequired) {
+      return { stable: true, elapsed, scroll_changed: scrollChanged, height_changed: heightChanged };
+    }
+  }
+  return { stable: false, elapsed, scroll_changed: Math.abs(container.scrollTop - observedScrollTop) > 2, height_changed: Math.abs(container.scrollHeight - observedScrollHeight) > 2 };
+}
+
 async function scanProductOpportunityScroll({
   container,
   collect,
   onProgress = null,
   shouldContinue = async () => true,
-  step = null,
-  loadWait = 1200,
   restoreScrollPosition = false,
   bottomStableRequired = 3,
   maxRounds = 240
 }) {
   if (!(container instanceof Element)) throw new Error("未找到商品机会列表的可滚动区域。");
   const originalScrollTop = container.scrollTop;
-  const scrollStep = step || Math.max(240, Math.floor(container.clientHeight * 0.8));
   const tolerance = 2;
   let bottomStableRounds = 0;
   let stopped = false;
@@ -929,17 +955,18 @@ async function scanProductOpportunityScroll({
       diagnosticLog(`扫描轮次: ${round + 1}\n\nscrollTop:\n${beforeScrollTop}\n\nclientHeight:\n${container.clientHeight}\n\nscrollHeight:\n${beforeScrollHeight}\n\n是否到底:\n${isNearBottom}\n\n当前数量:\n${beforeTotal}\n\n新增:\n${beforeAddedCount}\n\n当前关键词数量:\n${beforeTotal}`);
 
       if (!isNearBottom) {
+        const scrollStep = 400 + ((round * 173 + container.clientHeight) % 401);
         const targetScrollTop = Math.min(beforeScrollTop + scrollStep, maximumScrollTop);
         container.scrollTop = targetScrollTop;
-        diagnosticLog(`扫描轮次: ${round + 1}\n\n滚动前：\nscrollTop = ${beforeScrollTop}\n\n滚动后：\nscrollTop = ${container.scrollTop}`);
+        diagnosticLog(`扫描轮次: ${round + 1}\n\n滚动距离：\n${scrollStep}\n\n滚动前：\nscrollTop = ${beforeScrollTop}\n\n滚动后：\nscrollTop = ${container.scrollTop}`);
         bottomStableRounds = 0;
         progress("loading", beforeTotal, 0);
-        await waitForPageUpdate(loadWait);
+        await waitForProductOpportunityScrollStability(container);
         continue;
       }
 
       progress("loading", beforeTotal, 0);
-      await waitForPageUpdate(loadWait);
+      await waitForProductOpportunityScrollStability(container);
       const after = await collect({ phase: "scanning", scroll_top: container.scrollTop, scroll_height: container.scrollHeight });
       const afterTotal = Number(after?.total_count || beforeTotal);
       lastTotalCount = afterTotal;
@@ -3062,7 +3089,6 @@ function installPanel() {
         };
         const scanResult = await scanProductOpportunityScroll({
           container: scrollContainer,
-          step: 650,
           shouldContinue: canContinue,
           collect: async () => {
             const countBeforeCollect = opportunityCollectionCount;
