@@ -1649,7 +1649,12 @@ async function exportCollectionProject() {
   await writeProjectFile(collectionDirectory, `${filename}.json`, JSON.stringify(exportProducts, null, 2));
   await writeProjectFile(collectionDirectory, `${filename}.xlsx`, collectionXlsx(exportProducts, exportFields));
   await writeProjectFile(collectionDirectory, `${filename}.csv`, collectionCsv(exportProducts, exportFields));
-  return { folder_name: `${categoryDirectory.name}/${collectionDirectory.name}`, product_count: exportProducts.length };
+  return {
+    folder_name: `${categoryDirectory.name}/${collectionDirectory.name}`,
+    file_name: `${filename}.xlsx`,
+    location: `${rootDirectory.name} / ${categoryDirectory.name}`,
+    product_count: exportProducts.length
+  };
 }
 
 function saveCollectionTemplate() {
@@ -2234,7 +2239,7 @@ function installPanel() {
       .actions button.secondary { color: #315efb; background: #e8edff; }
       .actions button:disabled { cursor: default; opacity: .6; }
       .actions button[hidden] { display: none; }
-      .message { min-height: 18px; margin-top: 9px; color: #667085; font-size: 12px; }
+      .message { min-height: 18px; margin-top: 9px; color: #667085; font-size: 12px; white-space: pre-line; }
       .message.success { color: #16794c; }
       .message.error { color: #b42318; }
       .mode-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 10px; padding: 3px; border-radius: 7px; background: #e5eaf3; }
@@ -2774,7 +2779,7 @@ function installPanel() {
     try {
       setMessage("请选择项目保存位置…");
       const exported = await exportCollectionProject();
-      setMessage(`项目已导出：${exported.folder_name}（${exported.product_count} 条商品）`, "success");
+      setMessage(`项目已导出：\n${exported.file_name}（${exported.product_count}条）\n\n位置：\n${exported.location}`, "success");
     } catch (error) {
       if (error?.name === "AbortError") {
         setMessage("已取消选择保存位置。", "success");

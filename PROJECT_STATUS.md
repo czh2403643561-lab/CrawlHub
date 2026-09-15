@@ -17,6 +17,7 @@
 - 数据采集面板已统一商品机会与热卖榜的状态展示：顶部显示已识别页面、榜单/模式与采集状态，普通用户仅见固定的开始、暂停、停止、导出、清除操作；metadata、导出目录、字段来源与预览等调试信息收进默认折叠的“高级信息”。商品机会任务变化会直接切换并保留旧任务数据。
 - 页面分析的 `structures.scroll_containers` 现会输出真实可滚动元素的 selector、scrollHeight、clientHeight、overflow 与列表包含标记；商品机会采集复用同一判定，以列表结构、有效可视高度、与目标表格的 DOM 距离和滚动高度优先选择容器，不依赖不稳定的 `contains_target` 标记或平台容器 class。
 - 导出按数据来源拆分字段：商品机会的 JSON/XLSX/CSV 仅输出 keyword、category、source、search_count、selling_products，并使用“商品机会_热门关键词”文件名；热卖榜维持原有 `products.*` 文件和字段结构。
+- 导出完成提示现在显示文件名、数量及“父文件夹 / 类目文件夹”的相对位置，不显示系统绝对路径。
 
 ## 当前
 
