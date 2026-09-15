@@ -18,6 +18,7 @@
 - 页面分析的 `structures.scroll_containers` 现会输出真实可滚动元素的 selector、scrollHeight、clientHeight、overflow 与列表包含标记；商品机会采集复用同一判定，以列表结构、有效可视高度、与目标表格的 DOM 距离和滚动高度优先选择容器，不依赖不稳定的 `contains_target` 标记或平台容器 class。
 - 导出按数据来源拆分字段：商品机会的 JSON/XLSX/CSV 仅输出 keyword、category、source、search_count、selling_products，并使用“商品机会_热门关键词”文件名；热卖榜维持原有 `products.*` 文件和字段结构。
 - 导出完成提示现在显示文件名、数量及“父文件夹 / 类目文件夹”的相对位置，不显示系统绝对路径。
+- 已建立稳定基线：`stable-2026-09-15` 标签对应当前已推送代码，并重新生成 `dist/CrawlHub_稳定版_0.1.0.zip`，后续开发可在不改动该标签的前提下继续。
 
 ## 当前
 

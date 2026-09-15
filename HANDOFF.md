@@ -4,13 +4,9 @@
 
 这是一个纯 Chrome/Edge 浏览器数据采集扩展，不是商品情报中心，也不包含 AI 分析、供应链、商品展示面板。
 
-当前本地分支：`main`，最新提交：`90733d7 chore: package CrawlHub for sharing`。
+当前本地分支：`main`，最新稳定代码：`e4ea411 fix: show export save location`；本地已与 GitHub `origin/main` 同步。
 
-GitHub 远端：`origin/main`。本地包含尚未推送的发布包、上手指南和本文件提交。此前推送因 Windows TLS 握手失败中断，代码和发布包均已保留在本地；恢复网络后执行：
-
-```powershell
-git push origin main
-```
+稳定基线标签：`stable-2026-09-15`。最新稳定包：[dist/CrawlHub_稳定版_0.1.0.zip](dist/CrawlHub_稳定版_0.1.0.zip)。稳定标签和稳定包用于继续开发时的安全恢复，不会因后续新功能修改而变化。
 
 ## 项目用途
 
@@ -26,7 +22,7 @@ git push origin main
 
 - 扩展入口：`manifest.json`，Manifest V3。
 - 开发运行：Chrome/Edge 扩展页面开启开发者模式，选择“加载已解压的扩展程序”，指向项目根目录。
-- 可分享发布包：[dist/CrawlHub_可运行版_0.1.0.zip](dist/CrawlHub_可运行版_0.1.0.zip)。解压后直接选择含 `manifest.json` 的目录。
+- 可分享发布包：[dist/CrawlHub_稳定版_0.1.0.zip](dist/CrawlHub_稳定版_0.1.0.zip)。解压后直接选择含 `manifest.json` 的目录。
 - 小白指南：[CrawlHub_电脑小白上手指南.md](CrawlHub_电脑小白上手指南.md)。
 
 ## 关键文件
