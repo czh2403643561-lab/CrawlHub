@@ -1043,13 +1043,6 @@ async function saveCurrentTaskStatus(status) {
   return savedProject;
 }
 
-function requestCollectionTaskSwitch(nextTask, reason = "检测到页面类型变化") {
-  if (typeof window.__crawlHubRequestTaskSwitch === "function") {
-    return window.__crawlHubRequestTaskSwitch(nextTask, reason);
-  }
-  return Promise.resolve(false);
-}
-
 async function collectCurrentPage() {
   const result = detectCollectionPageType() === "product_opportunity" ? collectProductOpportunityData() : collectPageData();
   const pagination = detectPaginationState();
@@ -1057,8 +1050,10 @@ async function collectCurrentPage() {
   const nextTask = collectionTaskIdentity(result.metadata);
   const currentTask = window.__crawlHubActiveTask;
   if (currentTask && currentTask.task_id !== nextTask.task_id) {
-    const confirmed = await requestCollectionTaskSwitch(nextTask, "检测到页面类型变化");
-    if (!confirmed) return { cancelled: true, task_switch_cancelled: true, result: window.__crawlHubCollectionPreview || null, pagination, duplicate: false };
+    if (result.source_type !== "product_opportunity") {
+      const confirmed = window.confirm(`检测到类目或榜单已变化。\n旧任务数据会保留，新榜单将创建新的采集任务。\n\n是否切换到“${nextTask.label}”？`);
+      if (!confirmed) return { cancelled: true, task_switch_cancelled: true, result: window.__crawlHubCollectionPreview || null, pagination, duplicate: false };
+    }
     await activateCollectionTask(nextTask, result.metadata);
   } else if (!currentTask) {
     await activateCollectionTask(nextTask, result.metadata);
@@ -1067,8 +1062,10 @@ async function collectCurrentPage() {
   const existingPages = Array.isArray(window.__crawlHubManualCollectionPages) ? window.__crawlHubManualCollectionPages : [];
   const previousEnvironment = window.__crawlHubCollectionEnvironment;
   if (existingPages.length && previousEnvironment && previousEnvironment.signature !== JSON.stringify(environment)) {
-    const confirmed = await requestCollectionTaskSwitch(nextTask, "当前任务的页面结构发生变化");
-    if (!confirmed) return { cancelled: true, result: window.__crawlHubCollectionPreview || null, pagination, duplicate: false };
+    if (result.source_type !== "product_opportunity") {
+      const confirmed = window.confirm("当前任务的分页或页面结构发生变化。\n旧任务数据会保留，本次将重新记录当前页面结果。\n\n是否继续？");
+      if (!confirmed) return { cancelled: true, result: window.__crawlHubCollectionPreview || null, pagination, duplicate: false };
+    }
     clearCollectionData();
     window.__crawlHubActiveTask = { ...nextTask, status: "active", collected_count: 0 };
   }
@@ -2090,13 +2087,13 @@ function installPanel() {
     <style>
       :host { all: initial; }
       * { box-sizing: border-box; }
-      .panel { overflow: hidden; border: 1px solid #d9e0ed; border-radius: 10px; background: #f6f8fc; box-shadow: 0 8px 30px rgba(16, 24, 40, .22); }
+      .panel { display: flex; max-height: calc(100vh - 32px); flex-direction: column; overflow: hidden; border: 1px solid #d9e0ed; border-radius: 10px; background: #f6f8fc; box-shadow: 0 8px 30px rgba(16, 24, 40, .22); }
       header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; color: #fff; background: #315efb; cursor: move; user-select: none; }
       header strong { flex: 1; font-size: 14px; }
       header button { width: 24px; height: 24px; border: 0; border-radius: 5px; color: #fff; background: rgba(255,255,255,.18); cursor: pointer; font-size: 16px; line-height: 20px; }
       header button.settings { font-size: 14px; }
       header button.reconnect { font-size: 15px; }
-      .content { padding: 12px; }
+      .content { min-height: 0; flex: 1 1 auto; overflow: auto; padding: 12px; }
       .hint { margin-bottom: 10px; color: #667085; font-size: 12px; }
       .state { margin-bottom: 8px; font-weight: 600; }
       .state span { color: #16794c; }
@@ -2122,10 +2119,13 @@ function installPanel() {
       .collection-card strong { color: #172033; }
       .collection-card p { margin: 5px 0 0; }
       .collection-meta { margin: 9px 0; color: #344054; }
-      .page-recognition { margin: 9px 0; padding: 8px; border-radius: 6px; color: #16794c; background: #ecfdf3; white-space: pre-line; font-weight: 600; }
-      .task-switch-prompt { margin: 9px 0; padding: 8px; border-radius: 6px; color: #b54708; background: #fffaeb; white-space: pre-line; }
-      .task-switch-actions { display: flex; gap: 6px; margin-bottom: 9px; }
-      .task-switch-actions button { flex: 1; border: 0; border-radius: 6px; padding: 6px 8px; color: #315efb; background: #e8edff; cursor: pointer; font: inherit; font-weight: 600; }
+      .opportunity-summary { margin: 9px 0; padding: 10px; border-radius: 7px; color: #16794c; background: #ecfdf3; }
+      .opportunity-summary p { margin: 0 0 7px; color: inherit; font-weight: 600; }
+      .opportunity-summary ul { display: flex; flex-wrap: wrap; gap: 5px; margin: 5px 0 0; padding: 0; list-style: none; }
+      .opportunity-summary li { padding: 3px 6px; border-radius: 4px; color: #16794c; background: #d1fadf; font-size: 12px; }
+      .collection-advanced { margin: 9px 0; color: #475467; }
+      .collection-advanced summary { cursor: pointer; color: #344054; font-weight: 600; }
+      .collection-advanced.rank-diagnostics > summary { display: none; }
       .collection-fields { max-height: 84px; margin: 0; padding: 0; overflow: auto; list-style: none; }
       .collection-fields li { margin-top: 4px; border-radius: 5px; padding: 5px 7px; background: #f6f8fc; overflow-wrap: anywhere; font-size: 12px; }
       .collection-fields li:first-child { margin-top: 0; }
@@ -2134,7 +2134,7 @@ function installPanel() {
       .collection-preview-table th, .collection-preview-table td { min-width: 84px; max-width: 180px; padding: 6px; border-bottom: 1px solid #eaecf0; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
       .collection-preview-table th { position: sticky; top: 0; color: #344054; background: #f6f8fc; }
       .collection-preview-table td { color: #475467; }
-      .collection-actions { gap: 5px; }
+      .collection-actions { position: sticky; bottom: -12px; z-index: 2; gap: 5px; padding: 7px 0 12px; background: #f6f8fc; }
       .collection-actions button { padding: 6px 8px; }
       .export-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
       .export-options[hidden] { display: none; }
@@ -2164,19 +2164,19 @@ function installPanel() {
         </div>
         <div id="collectionView" class="view" hidden>
           <div class="collection-card">
-            <strong>当前页数据提取验证</strong>
-            <p>根据表头和行列关系生成字段模板，提取当前已加载的表格或列表数据。</p>
-            <div id="pageRecognition" class="page-recognition" hidden></div>
-            <div id="taskSwitchPrompt" class="task-switch-prompt" hidden></div>
-            <div id="taskSwitchActions" class="task-switch-actions" hidden><button id="confirmTaskSwitch" type="button">确认</button><button id="cancelTaskSwitch" type="button">取消</button></div>
-            <div id="collectionState" class="collection-meta">尚未采集</div>
-            <div id="taskStatus" class="collection-meta">当前任务：未创建</div>
-            <div id="metadataStatus" class="collection-meta">metadata：等待采样顶部类目标签</div>
-            <div id="exportRootStatus" class="collection-meta">默认导出目录：未设置（请点击齿轮设置）</div>
-            <div id="paginationStatus" class="collection-meta">分页状态：未识别</div>
-            <ul id="collectionFields" class="collection-fields"><li>字段模板：未生成</li></ul>
-            <div id="collectionPreviewTable" class="collection-preview-table">点击“采集当前页”查看示例数据。</div>
-            <div id="templateStatus" class="collection-meta">字段模板尚未保存</div>
+            <strong id="collectionTitle">当前页数据提取验证</strong>
+            <p id="collectionHint">根据表头和行列关系生成字段模板，提取当前已加载的表格或列表数据。</p>
+            <div id="opportunitySummary" class="opportunity-summary" hidden><p>✓ 页面已识别</p><p>页面：TikTok 商品机会 - 热门关键词</p><p id="opportunityState">状态：等待采集</p><strong>已识别字段：</strong><ul><li>关键词</li><li>类目</li><li>线索来源</li><li>搜索次数</li><li>在售商品</li></ul></div>
+            <details id="collectionAdvanced" class="collection-advanced"><summary>高级信息</summary><div id="collectionDiagnostics">
+              <div id="collectionState" class="collection-meta">尚未采集</div>
+              <div id="taskStatus" class="collection-meta">当前任务：未创建</div>
+              <div id="metadataStatus" class="collection-meta">metadata：等待采样顶部类目标签</div>
+              <div id="exportRootStatus" class="collection-meta">默认导出目录：未设置（请点击齿轮设置）</div>
+              <div id="paginationStatus" class="collection-meta">分页状态：未识别</div>
+              <ul id="collectionFields" class="collection-fields"><li>字段模板：未生成</li></ul>
+              <div id="collectionPreviewTable" class="collection-preview-table">点击“采集当前页”查看示例数据。</div>
+              <div id="templateStatus" class="collection-meta">字段模板尚未保存</div>
+            </div></details>
           </div>
           <div class="actions collection-actions" style="margin-top: 7px;">
             <button id="collectCollection">采集当前页</button>
@@ -2200,11 +2200,11 @@ function installPanel() {
   const collectionView = shadow.querySelector("#collectionView");
   const analysisModeButton = shadow.querySelector("#analysisMode");
   const collectionModeButton = shadow.querySelector("#collectionMode");
-  const pageRecognition = shadow.querySelector("#pageRecognition");
-  const taskSwitchPrompt = shadow.querySelector("#taskSwitchPrompt");
-  const taskSwitchActions = shadow.querySelector("#taskSwitchActions");
-  const confirmTaskSwitchButton = shadow.querySelector("#confirmTaskSwitch");
-  const cancelTaskSwitchButton = shadow.querySelector("#cancelTaskSwitch");
+  const collectionTitle = shadow.querySelector("#collectionTitle");
+  const collectionHint = shadow.querySelector("#collectionHint");
+  const opportunitySummary = shadow.querySelector("#opportunitySummary");
+  const opportunityState = shadow.querySelector("#opportunityState");
+  const collectionAdvanced = shadow.querySelector("#collectionAdvanced");
   const collectionState = shadow.querySelector("#collectionState");
   const taskStatus = shadow.querySelector("#taskStatus");
   const metadataStatus = shadow.querySelector("#metadataStatus");
@@ -2231,6 +2231,7 @@ function installPanel() {
   const analyzeButton = shadow.querySelector("#analyze");
   const message = shadow.querySelector("#message");
   let opportunityCollectionState = "idle";
+  let previousCollectionPageType = null;
   const header = shadow.querySelector("header");
   const dragState = { active: false, offsetX: 0, offsetY: 0, htmlUserSelect: "", bodyUserSelect: "" };
   const stopPanelDrag = () => {
@@ -2270,24 +2271,6 @@ function installPanel() {
     message.textContent = text;
     message.className = `message ${kind}`.trim();
   };
-  let pendingTaskSwitch = null;
-  const resolveTaskSwitch = (confirmed) => {
-    if (!pendingTaskSwitch) return;
-    const pending = pendingTaskSwitch;
-    pendingTaskSwitch = null;
-    taskSwitchPrompt.hidden = true;
-    taskSwitchActions.hidden = true;
-    pending.resolve(confirmed);
-  };
-  window.__crawlHubRequestTaskSwitch = (nextTask, reason) => new Promise((resolve) => {
-    if (pendingTaskSwitch) pendingTaskSwitch.resolve(false);
-    pendingTaskSwitch = { resolve };
-    taskSwitchPrompt.textContent = `⚠ ${reason}\n\n当前：${nextTask.label}\n\n是否创建新的采集任务？`;
-    taskSwitchPrompt.hidden = false;
-    taskSwitchActions.hidden = false;
-  });
-  confirmTaskSwitchButton.addEventListener("click", () => resolveTaskSwitch(true));
-  cancelTaskSwitchButton.addEventListener("click", () => resolveTaskSwitch(false));
   const renderExportRootStatus = () => {
     exportRootStatus.textContent = "默认导出目录：读取中…";
     readExportRootDirectory().then((handle) => {
@@ -2318,8 +2301,14 @@ function installPanel() {
     const pageType = detectCollectionPageType();
     const isOpportunity = pageType === "product_opportunity";
     const opportunityStateLabel = opportunityCollectionState === "active" ? "采集中" : opportunityCollectionState === "paused" ? "已暂停" : opportunityCollectionState === "completed" ? "已完成" : opportunityCollectionState === "stopped" ? "已停止" : "待开始";
-    pageRecognition.hidden = !isOpportunity;
-    if (isOpportunity) pageRecognition.textContent = `✓ 页面已识别\n\nTikTok 商品机会\n热门关键词\n\n采集模式：自动滚动采集（暂未启用）\n状态：${opportunityStateLabel}`;
+    const opportunityUserState = opportunityCollectionState === "active" ? "正在采集" : opportunityCollectionState === "completed" ? "已完成" : "等待采集";
+    opportunitySummary.hidden = !isOpportunity;
+    collectionTitle.hidden = isOpportunity;
+    collectionHint.hidden = isOpportunity;
+    collectionAdvanced.classList.toggle("rank-diagnostics", !isOpportunity);
+    if (isOpportunity) opportunityState.textContent = `状态：${opportunityUserState}`;
+    if (previousCollectionPageType !== pageType) collectionAdvanced.open = !isOpportunity;
+    previousCollectionPageType = pageType;
     collectCollectionButton.textContent = isOpportunity ? "开始采集" : "采集当前页";
     collectCollectionButton.disabled = Boolean(window.__crawlHubCollectionBusy);
     saveCollectionTemplateButton.hidden = isOpportunity;
@@ -2430,11 +2419,6 @@ function installPanel() {
     const nextTask = collectionTaskIdentity(metadata);
     const currentTask = window.__crawlHubActiveTask;
     if (!currentTask || currentTask.task_id === nextTask.task_id) return;
-    const confirmed = await requestCollectionTaskSwitch(nextTask, "检测到页面类型变化");
-    if (!confirmed) {
-      setMessage("已保留原采集任务。", "success");
-      return;
-    }
     await activateCollectionTask(nextTask, metadata);
     opportunityCollectionState = "idle";
     renderCollection();
@@ -2675,14 +2659,12 @@ function installPanel() {
     content.hidden = !content.hidden;
   });
   shadow.querySelector("#close").addEventListener("click", () => {
-    resolveTaskSwitch(false);
     stopPanelDrag();
     stopElementSampling();
     host.remove();
     delete window.__crawlHubPanelHost;
     delete window.__crawlHubSamplingChanged;
     delete window.__crawlHubCollectionRender;
-    delete window.__crawlHubRequestTaskSwitch;
   });
   setMode(window.__crawlHubMode || "analysis");
   void checkDetectedTaskChange();
