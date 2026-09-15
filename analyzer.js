@@ -1043,6 +1043,13 @@ async function saveCurrentTaskStatus(status) {
   return savedProject;
 }
 
+function requestCollectionTaskSwitch(nextTask, reason = "检测到页面类型变化") {
+  if (typeof window.__crawlHubRequestTaskSwitch === "function") {
+    return window.__crawlHubRequestTaskSwitch(nextTask, reason);
+  }
+  return Promise.resolve(false);
+}
+
 async function collectCurrentPage() {
   const result = detectCollectionPageType() === "product_opportunity" ? collectProductOpportunityData() : collectPageData();
   const pagination = detectPaginationState();
@@ -1050,7 +1057,7 @@ async function collectCurrentPage() {
   const nextTask = collectionTaskIdentity(result.metadata);
   const currentTask = window.__crawlHubActiveTask;
   if (currentTask && currentTask.task_id !== nextTask.task_id) {
-    const confirmed = window.confirm(`检测到类目或榜单已变化。\n旧任务数据会保留，新榜单将创建新的采集任务。\n\n是否切换到“${nextTask.label}”？`);
+    const confirmed = await requestCollectionTaskSwitch(nextTask, "检测到页面类型变化");
     if (!confirmed) return { cancelled: true, task_switch_cancelled: true, result: window.__crawlHubCollectionPreview || null, pagination, duplicate: false };
     await activateCollectionTask(nextTask, result.metadata);
   } else if (!currentTask) {
@@ -1060,7 +1067,7 @@ async function collectCurrentPage() {
   const existingPages = Array.isArray(window.__crawlHubManualCollectionPages) ? window.__crawlHubManualCollectionPages : [];
   const previousEnvironment = window.__crawlHubCollectionEnvironment;
   if (existingPages.length && previousEnvironment && previousEnvironment.signature !== JSON.stringify(environment)) {
-    const confirmed = window.confirm("当前任务的分页或页面结构发生变化。\n旧任务数据会保留，本次将重新记录当前页面结果。\n\n是否继续？");
+    const confirmed = await requestCollectionTaskSwitch(nextTask, "当前任务的页面结构发生变化");
     if (!confirmed) return { cancelled: true, result: window.__crawlHubCollectionPreview || null, pagination, duplicate: false };
     clearCollectionData();
     window.__crawlHubActiveTask = { ...nextTask, status: "active", collected_count: 0 };
@@ -2115,6 +2122,10 @@ function installPanel() {
       .collection-card strong { color: #172033; }
       .collection-card p { margin: 5px 0 0; }
       .collection-meta { margin: 9px 0; color: #344054; }
+      .page-recognition { margin: 9px 0; padding: 8px; border-radius: 6px; color: #16794c; background: #ecfdf3; white-space: pre-line; font-weight: 600; }
+      .task-switch-prompt { margin: 9px 0; padding: 8px; border-radius: 6px; color: #b54708; background: #fffaeb; white-space: pre-line; }
+      .task-switch-actions { display: flex; gap: 6px; margin-bottom: 9px; }
+      .task-switch-actions button { flex: 1; border: 0; border-radius: 6px; padding: 6px 8px; color: #315efb; background: #e8edff; cursor: pointer; font: inherit; font-weight: 600; }
       .collection-fields { max-height: 84px; margin: 0; padding: 0; overflow: auto; list-style: none; }
       .collection-fields li { margin-top: 4px; border-radius: 5px; padding: 5px 7px; background: #f6f8fc; overflow-wrap: anywhere; font-size: 12px; }
       .collection-fields li:first-child { margin-top: 0; }
@@ -2155,6 +2166,9 @@ function installPanel() {
           <div class="collection-card">
             <strong>当前页数据提取验证</strong>
             <p>根据表头和行列关系生成字段模板，提取当前已加载的表格或列表数据。</p>
+            <div id="pageRecognition" class="page-recognition" hidden></div>
+            <div id="taskSwitchPrompt" class="task-switch-prompt" hidden></div>
+            <div id="taskSwitchActions" class="task-switch-actions" hidden><button id="confirmTaskSwitch" type="button">确认</button><button id="cancelTaskSwitch" type="button">取消</button></div>
             <div id="collectionState" class="collection-meta">尚未采集</div>
             <div id="taskStatus" class="collection-meta">当前任务：未创建</div>
             <div id="metadataStatus" class="collection-meta">metadata：等待采样顶部类目标签</div>
@@ -2186,6 +2200,11 @@ function installPanel() {
   const collectionView = shadow.querySelector("#collectionView");
   const analysisModeButton = shadow.querySelector("#analysisMode");
   const collectionModeButton = shadow.querySelector("#collectionMode");
+  const pageRecognition = shadow.querySelector("#pageRecognition");
+  const taskSwitchPrompt = shadow.querySelector("#taskSwitchPrompt");
+  const taskSwitchActions = shadow.querySelector("#taskSwitchActions");
+  const confirmTaskSwitchButton = shadow.querySelector("#confirmTaskSwitch");
+  const cancelTaskSwitchButton = shadow.querySelector("#cancelTaskSwitch");
   const collectionState = shadow.querySelector("#collectionState");
   const taskStatus = shadow.querySelector("#taskStatus");
   const metadataStatus = shadow.querySelector("#metadataStatus");
@@ -2251,6 +2270,24 @@ function installPanel() {
     message.textContent = text;
     message.className = `message ${kind}`.trim();
   };
+  let pendingTaskSwitch = null;
+  const resolveTaskSwitch = (confirmed) => {
+    if (!pendingTaskSwitch) return;
+    const pending = pendingTaskSwitch;
+    pendingTaskSwitch = null;
+    taskSwitchPrompt.hidden = true;
+    taskSwitchActions.hidden = true;
+    pending.resolve(confirmed);
+  };
+  window.__crawlHubRequestTaskSwitch = (nextTask, reason) => new Promise((resolve) => {
+    if (pendingTaskSwitch) pendingTaskSwitch.resolve(false);
+    pendingTaskSwitch = { resolve };
+    taskSwitchPrompt.textContent = `⚠ ${reason}\n\n当前：${nextTask.label}\n\n是否创建新的采集任务？`;
+    taskSwitchPrompt.hidden = false;
+    taskSwitchActions.hidden = false;
+  });
+  confirmTaskSwitchButton.addEventListener("click", () => resolveTaskSwitch(true));
+  cancelTaskSwitchButton.addEventListener("click", () => resolveTaskSwitch(false));
   const renderExportRootStatus = () => {
     exportRootStatus.textContent = "默认导出目录：读取中…";
     readExportRootDirectory().then((handle) => {
@@ -2281,6 +2318,8 @@ function installPanel() {
     const pageType = detectCollectionPageType();
     const isOpportunity = pageType === "product_opportunity";
     const opportunityStateLabel = opportunityCollectionState === "active" ? "采集中" : opportunityCollectionState === "paused" ? "已暂停" : opportunityCollectionState === "completed" ? "已完成" : opportunityCollectionState === "stopped" ? "已停止" : "待开始";
+    pageRecognition.hidden = !isOpportunity;
+    if (isOpportunity) pageRecognition.textContent = `✓ 页面已识别\n\nTikTok 商品机会\n热门关键词\n\n采集模式：自动滚动采集（暂未启用）\n状态：${opportunityStateLabel}`;
     collectCollectionButton.textContent = isOpportunity ? "开始采集" : "采集当前页";
     collectCollectionButton.disabled = Boolean(window.__crawlHubCollectionBusy);
     saveCollectionTemplateButton.hidden = isOpportunity;
@@ -2382,6 +2421,25 @@ function installPanel() {
     }
   };
   window.__crawlHubCollectionRender = renderCollection;
+  let checkedDetectedTaskChange = false;
+  const checkDetectedTaskChange = async () => {
+    if (checkedDetectedTaskChange || detectCollectionPageType() !== "product_opportunity") return;
+    checkedDetectedTaskChange = true;
+    setMode("collection");
+    const metadata = { category_full: "商品机会", category_short: "商品机会", rank_type: "热门关键词" };
+    const nextTask = collectionTaskIdentity(metadata);
+    const currentTask = window.__crawlHubActiveTask;
+    if (!currentTask || currentTask.task_id === nextTask.task_id) return;
+    const confirmed = await requestCollectionTaskSwitch(nextTask, "检测到页面类型变化");
+    if (!confirmed) {
+      setMessage("已保留原采集任务。", "success");
+      return;
+    }
+    await activateCollectionTask(nextTask, metadata);
+    opportunityCollectionState = "idle";
+    renderCollection();
+    setMessage("已创建商品机会采集任务，等待开始。", "success");
+  };
   const setMode = (mode) => {
     window.__crawlHubMode = mode;
     const isAnalysis = mode === "analysis";
@@ -2617,14 +2675,17 @@ function installPanel() {
     content.hidden = !content.hidden;
   });
   shadow.querySelector("#close").addEventListener("click", () => {
+    resolveTaskSwitch(false);
     stopPanelDrag();
     stopElementSampling();
     host.remove();
     delete window.__crawlHubPanelHost;
     delete window.__crawlHubSamplingChanged;
     delete window.__crawlHubCollectionRender;
+    delete window.__crawlHubRequestTaskSwitch;
   });
   setMode(window.__crawlHubMode || "analysis");
+  void checkDetectedTaskChange();
   return { started: true, already_open: false };
 }
 
