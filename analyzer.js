@@ -1,5 +1,39 @@
 (() => {
 
+function inspectScrollableElements(target = null, limit = 30) {
+  const selectorFor = (element) => {
+    const parts = [];
+    for (let current = element; current && current.nodeType === Node.ELEMENT_NODE && parts.length < 6; current = current.parentElement) {
+      let part = current.tagName.toLowerCase();
+      if (current.id) part += `#${current.id.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+      else if (current.classList.length) part += `.${Array.from(current.classList).slice(0, 2).join(".")}`;
+      parts.unshift(part);
+    }
+    return parts.join(" > ");
+  };
+  return Array.from(document.querySelectorAll("*")).map((element) => {
+    const style = getComputedStyle(element);
+    const scrollHeight = element.scrollHeight;
+    const clientHeight = element.clientHeight;
+    const overflow = style.overflowY;
+    const canScroll = scrollHeight > clientHeight + 8 && !["visible", "clip"].includes(overflow);
+    return {
+      element,
+      selector: selectorFor(element),
+      scrollHeight,
+      clientHeight,
+      overflow,
+      is_scrollable: canScroll,
+      contains_target: Boolean(target && element.contains(target))
+    };
+  }).filter((item) => item.is_scrollable)
+    .map((item) => ({ ...item, contains_list_data: Boolean(item.element.querySelector("table, [role='rowgroup'], [role='grid'], [role='list']")) }))
+    .sort((left, right) => Number(right.contains_target) - Number(left.contains_target)
+      || Number(right.contains_list_data) - Number(left.contains_list_data)
+      || right.scrollHeight - left.scrollHeight)
+    .slice(0, limit);
+}
+
 function analyzePage() {
   const LIMITS = {
     textNodes: 2000,
@@ -178,6 +212,7 @@ function analyzePage() {
       sample_records: dataRows.slice(0, LIMITS.sampleItems).map((row) => Object.fromEntries(columns.map((column) => [column.name, getCells(row)[column.index] || ""])))
     };
   });
+  const scrollContainers = inspectScrollableElements(null, LIMITS.structures).map(({ element, ...item }) => item);
 
   const jsonCandidates = [];
   for (const script of Array.from(document.scripts)) {
@@ -287,6 +322,7 @@ function analyzePage() {
     structures: {
       lists,
       tables,
+      scroll_containers: scrollContainers,
       possible_repeated_containers: Array.from(document.querySelectorAll("[class]"))
         .filter((element) => isVisible(element) && element.children.length >= 2)
         .slice(0, 30)
@@ -764,16 +800,15 @@ function detectCollectionPageType() {
 function findProductOpportunityScrollContainer(detected = detectProductOpportunityTable()) {
   const table = detected?.table;
   if (!table) return null;
-  const isScrollable = (element) => {
-    if (!(element instanceof Element)) return false;
-    const style = getComputedStyle(element);
-    return element.scrollHeight > element.clientHeight + 8 && /auto|scroll|overlay/.test(style.overflowY);
-  };
-  for (let element = table.parentElement, depth = 0; element && depth < 10; element = element.parentElement, depth += 1) {
-    if (isScrollable(element)) return element;
-  }
-  return Array.from(document.querySelectorAll(".core-table-content-scroll"))
-    .find((element) => element.contains(table) && isScrollable(element)) || null;
+  const cached = window.__crawlHubOpportunityScrollContainer;
+  if (cached instanceof Element && document.documentElement.contains(cached) && cached.contains(table)
+    && cached.scrollHeight > cached.clientHeight + 8) return cached;
+  const candidates = inspectScrollableElements(table);
+  const container = candidates.find((item) => item.contains_target && item.contains_list_data)?.element
+    || candidates.find((item) => item.contains_target)?.element
+    || null;
+  window.__crawlHubOpportunityScrollContainer = container;
+  return container;
 }
 
 function collectProductOpportunityData() {
