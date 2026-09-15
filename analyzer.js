@@ -901,6 +901,9 @@ async function scanProductOpportunityScroll({
   let bottomStableRounds = 0;
   let stopped = false;
   let completed = false;
+  let lastTotalCount = 0;
+  let endReason = "达到最大扫描轮次，未确认到底部";
+  const diagnosticLog = (message) => console.debug(`[CrawlHub][商品机会扫描]\n${message}`);
   const progress = (phase, totalCount = 0, addedCount = 0) => {
     onProgress?.({ phase, total_count: totalCount, added_count: addedCount, scroll_top: container.scrollTop, scroll_height: container.scrollHeight });
   };
@@ -911,18 +914,24 @@ async function scanProductOpportunityScroll({
     for (let round = 0; round < maxRounds; round += 1) {
       if (!await shouldContinue()) {
         stopped = true;
+        endReason = "任务被停止";
         break;
       }
       const beforeScrollTop = container.scrollTop;
       const beforeScrollHeight = container.scrollHeight;
       const before = await collect({ phase: "scanning", scroll_top: beforeScrollTop, scroll_height: beforeScrollHeight });
       const beforeTotal = Number(before?.total_count || 0);
+      lastTotalCount = beforeTotal;
       progress("scanning", beforeTotal, Number(before?.added_count || 0));
       const maximumScrollTop = Math.max(0, beforeScrollHeight - container.clientHeight);
       const isNearBottom = beforeScrollTop >= maximumScrollTop - tolerance;
+      const beforeAddedCount = Number(before?.added_count || 0);
+      diagnosticLog(`扫描轮次: ${round + 1}\n\nscrollTop:\n${beforeScrollTop}\n\nclientHeight:\n${container.clientHeight}\n\nscrollHeight:\n${beforeScrollHeight}\n\n是否到底:\n${isNearBottom}\n\n当前数量:\n${beforeTotal}\n\n新增:\n${beforeAddedCount}\n\n当前关键词数量:\n${beforeTotal}`);
 
       if (!isNearBottom) {
-        container.scrollTop = Math.min(beforeScrollTop + scrollStep, maximumScrollTop);
+        const targetScrollTop = Math.min(beforeScrollTop + scrollStep, maximumScrollTop);
+        container.scrollTop = targetScrollTop;
+        diagnosticLog(`扫描轮次: ${round + 1}\n\n滚动前：\nscrollTop = ${beforeScrollTop}\n\n滚动后：\nscrollTop = ${container.scrollTop}`);
         bottomStableRounds = 0;
         progress("loading", beforeTotal, 0);
         await waitForPageUpdate(loadWait);
@@ -933,6 +942,7 @@ async function scanProductOpportunityScroll({
       await waitForPageUpdate(loadWait);
       const after = await collect({ phase: "scanning", scroll_top: container.scrollTop, scroll_height: container.scrollHeight });
       const afterTotal = Number(after?.total_count || beforeTotal);
+      lastTotalCount = afterTotal;
       const addedCount = Math.max(Number(after?.added_count || 0), afterTotal - beforeTotal);
       const afterScrollTop = container.scrollTop;
       const afterScrollHeight = container.scrollHeight;
@@ -941,10 +951,12 @@ async function scanProductOpportunityScroll({
         && Math.abs(afterScrollHeight - beforeScrollHeight) <= tolerance
         && Math.abs(afterScrollTop - beforeScrollTop) <= tolerance
         && addedCount === 0;
+      diagnosticLog(`扫描轮次: ${round + 1}\n\n滚动前：\nscrollTop = ${beforeScrollTop}\n\n滚动后：\nscrollTop = ${afterScrollTop}\n\nclientHeight:\n${container.clientHeight}\n\nscrollHeight:\n${afterScrollHeight}\n\n是否到底:\n${afterScrollTop >= afterMaximumScrollTop - tolerance}\n\n当前数量:\n${afterTotal}\n\n新增:\n${addedCount}\n\n当前关键词数量:\n${afterTotal}\n\n底部稳定轮次:\n${bottomStableRounds + (bottomStable ? 1 : 0)}`);
       progress("scanning", afterTotal, addedCount);
       bottomStableRounds = bottomStable ? bottomStableRounds + 1 : 0;
       if (bottomStableRounds >= bottomStableRequired) {
         completed = true;
+        endReason = "到达底部且连续无新增";
         break;
       }
     }
@@ -953,6 +965,7 @@ async function scanProductOpportunityScroll({
       container.scrollTop = originalScrollTop;
       await waitForPageUpdate(180);
     }
+    diagnosticLog(`扫描${completed ? "完成" : "结束"}\n\n原因：\n- ${endReason}\n\n最终 scrollTop：\n${container.scrollTop}\n\n最终 scrollHeight：\n${container.scrollHeight}\n\n最终数量：\n${lastTotalCount}`);
   }
   return { stopped, completed, reached_limit: !stopped && !completed, bottom_stable_rounds: bottomStableRounds };
 }
