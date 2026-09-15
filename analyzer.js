@@ -883,6 +883,80 @@ function waitForPageUpdate(milliseconds = 180) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+async function scanProductOpportunityScroll({
+  container,
+  collect,
+  onProgress = null,
+  shouldContinue = async () => true,
+  step = null,
+  loadWait = 1200,
+  restoreScrollPosition = false,
+  bottomStableRequired = 3,
+  maxRounds = 240
+}) {
+  if (!(container instanceof Element)) throw new Error("未找到商品机会列表的可滚动区域。");
+  const originalScrollTop = container.scrollTop;
+  const scrollStep = step || Math.max(240, Math.floor(container.clientHeight * 0.8));
+  const tolerance = 2;
+  let bottomStableRounds = 0;
+  let stopped = false;
+  let completed = false;
+  const progress = (phase, totalCount = 0, addedCount = 0) => {
+    onProgress?.({ phase, total_count: totalCount, added_count: addedCount, scroll_top: container.scrollTop, scroll_height: container.scrollHeight });
+  };
+
+  try {
+    container.scrollTop = 0;
+    await waitForPageUpdate(180);
+    for (let round = 0; round < maxRounds; round += 1) {
+      if (!await shouldContinue()) {
+        stopped = true;
+        break;
+      }
+      const beforeScrollTop = container.scrollTop;
+      const beforeScrollHeight = container.scrollHeight;
+      const before = await collect({ phase: "scanning", scroll_top: beforeScrollTop, scroll_height: beforeScrollHeight });
+      const beforeTotal = Number(before?.total_count || 0);
+      progress("scanning", beforeTotal, Number(before?.added_count || 0));
+      const maximumScrollTop = Math.max(0, beforeScrollHeight - container.clientHeight);
+      const isNearBottom = beforeScrollTop >= maximumScrollTop - tolerance;
+
+      if (!isNearBottom) {
+        container.scrollTop = Math.min(beforeScrollTop + scrollStep, maximumScrollTop);
+        bottomStableRounds = 0;
+        progress("loading", beforeTotal, 0);
+        await waitForPageUpdate(loadWait);
+        continue;
+      }
+
+      progress("loading", beforeTotal, 0);
+      await waitForPageUpdate(loadWait);
+      const after = await collect({ phase: "scanning", scroll_top: container.scrollTop, scroll_height: container.scrollHeight });
+      const afterTotal = Number(after?.total_count || beforeTotal);
+      const addedCount = Math.max(Number(after?.added_count || 0), afterTotal - beforeTotal);
+      const afterScrollTop = container.scrollTop;
+      const afterScrollHeight = container.scrollHeight;
+      const afterMaximumScrollTop = Math.max(0, afterScrollHeight - container.clientHeight);
+      const bottomStable = afterScrollTop >= afterMaximumScrollTop - tolerance
+        && Math.abs(afterScrollHeight - beforeScrollHeight) <= tolerance
+        && Math.abs(afterScrollTop - beforeScrollTop) <= tolerance
+        && addedCount === 0;
+      progress("scanning", afterTotal, addedCount);
+      bottomStableRounds = bottomStable ? bottomStableRounds + 1 : 0;
+      if (bottomStableRounds >= bottomStableRequired) {
+        completed = true;
+        break;
+      }
+    }
+  } finally {
+    if (restoreScrollPosition && document.documentElement.contains(container)) {
+      container.scrollTop = originalScrollTop;
+      await waitForPageUpdate(180);
+    }
+  }
+  return { stopped, completed, reached_limit: !stopped && !completed, bottom_stable_rounds: bottomStableRounds };
+}
+
 function findProductOpportunityRowForEntry(detected, container, entry) {
   const { keyword: keywordColumn, category: categoryColumn } = productOpportunityColumnIndexes(detected);
   if (keywordColumn < 0) return null;
@@ -901,7 +975,6 @@ async function scanProductOpportunityBindingIndex(onProgress = null) {
   if (!container) throw new Error("未找到热门关键词列表的可滚动区域。");
   const { keyword: keywordColumn, category: categoryColumn } = productOpportunityColumnIndexes(detected);
   if (keywordColumn < 0) throw new Error("当前页面未找到关键词列。");
-  const originalScrollTop = container.scrollTop;
   const entries = [];
   const seen = new Set();
   const updateProgress = (phase) => {
@@ -929,41 +1002,17 @@ async function scanProductOpportunityBindingIndex(onProgress = null) {
     });
   };
 
-  container.scrollTop = 0;
-  await waitForPageUpdate(180);
-  let stableBottomRounds = 0;
-  const step = Math.max(240, Math.floor(container.clientHeight * 0.8));
-  for (let attempt = 0; attempt < 240; attempt += 1) {
-    collectCurrentRows();
-    updateProgress("scanning");
-    const maximumScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
-    const currentScrollTop = container.scrollTop;
-    if (currentScrollTop < maximumScrollTop - 2) {
-      container.scrollTop = Math.min(currentScrollTop + step, maximumScrollTop);
-      stableBottomRounds = 0;
-      updateProgress("loading");
-      await waitForPageUpdate(1200);
-      continue;
-    }
-
-    const heightBeforeLoad = container.scrollHeight;
-    const countBeforeLoad = entries.length;
-    updateProgress("loading");
-    await waitForPageUpdate(1200);
-    collectCurrentRows();
-    updateProgress("scanning");
-    const maximumScrollTopAfterLoad = Math.max(0, container.scrollHeight - container.clientHeight);
-    if (maximumScrollTopAfterLoad > maximumScrollTop + 8 || container.scrollTop < maximumScrollTopAfterLoad - 2
-      || container.scrollHeight > heightBeforeLoad + 8 || entries.length > countBeforeLoad) {
-      stableBottomRounds = 0;
-      continue;
-    }
-    stableBottomRounds += 1;
-    if (stableBottomRounds >= 2) break;
-  }
-
-  container.scrollTop = originalScrollTop;
-  await waitForPageUpdate(180);
+  const scanResult = await scanProductOpportunityScroll({
+    container,
+    collect: async () => {
+      const countBeforeCollect = entries.length;
+      collectCurrentRows();
+      return { total_count: entries.length, added_count: entries.length - countBeforeCollect };
+    },
+    onProgress: ({ phase, total_count: totalCount }) => updateProgress(phase, totalCount),
+    restoreScrollPosition: true
+  });
+  if (!scanResult.completed) throw new Error("未能确认商品机会列表已滚动到底部，请稍后重试。");
   window.__crawlHubBindingSession = { state: "completed", entries, loaded_count: entries.length, scanned_at: Date.now() };
   if (onProgress) onProgress();
   return window.__crawlHubBindingSession;
@@ -2991,10 +3040,6 @@ function installPanel() {
         opportunityCollectionCount = 0;
         window.__crawlHubCollectionBusy = true;
         renderCollection();
-        setMessage(`正在滚动采集，已采集 ${opportunityCollectionCount} 条…`);
-        let collected = await collectCurrentPage();
-        opportunityCollectionCount = collected.result.item_count;
-        renderCollection();
         const scrollContainer = findProductOpportunityScrollContainer();
         if (!scrollContainer) throw new Error("未找到商品机会列表的可滚动容器。");
         const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -3002,22 +3047,26 @@ function installPanel() {
           while (opportunityCollectionState === "paused") await wait(250);
           return opportunityCollectionState !== "stopped";
         };
-        let unchangedScrolls = 0;
-        while (unchangedScrolls < 3 && await canContinue()) {
-          const countBeforeScroll = opportunityCollectionCount;
-          scrollContainer.scrollTop += 650;
-          setMessage(`正在滚动采集，已采集 ${countBeforeScroll} 条…`);
-          await wait(1200);
-          if (!await canContinue()) break;
-          collected = await collectCurrentPage();
-          opportunityCollectionCount = collected.result.item_count;
-          unchangedScrolls = opportunityCollectionCount > countBeforeScroll ? 0 : unchangedScrolls + 1;
-          renderCollection();
-        }
-        if (opportunityCollectionState === "stopped") {
+        const scanResult = await scanProductOpportunityScroll({
+          container: scrollContainer,
+          step: 650,
+          shouldContinue: canContinue,
+          collect: async () => {
+            const countBeforeCollect = opportunityCollectionCount;
+            const collected = await collectCurrentPage();
+            opportunityCollectionCount = collected.result.item_count;
+            renderCollection();
+            return { total_count: opportunityCollectionCount, added_count: Math.max(0, opportunityCollectionCount - countBeforeCollect) };
+          },
+          onProgress: ({ total_count: totalCount }) => {
+            setMessage(`正在滚动采集，已采集 ${totalCount} 条…`);
+          }
+        });
+        if (scanResult.stopped || opportunityCollectionState === "stopped") {
           setMessage(`商品机会采集已停止，已采集 ${opportunityCollectionCount} 条。`, "success");
           return;
         }
+        if (!scanResult.completed) throw new Error("未能确认商品机会列表已滚动到底部，请稍后重试。");
         opportunityCollectionState = "completed";
         renderCollection();
         setMessage(`✓ 商品机会采集完成：共 ${opportunityCollectionCount} 条，已保存到本地项目。`, "success");
@@ -3189,7 +3238,7 @@ function installPanel() {
   return { started: true, already_open: false };
 }
 
-window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, detectProductOpportunityTable, detectCollectionPageType, collectProductOpportunityData, scanProductOpportunityBindingIndex, locateProductOpportunityKeyword, isTrendingKeywordsOpportunityPage, collectCurrentPage, clearCollectionData, collectionCsv, collectionXlsx, collectionProjectData, exportCollectionProject, saveCollectionTemplate, startNetworkObserver, startElementSampling, pauseElementSampling, resumeElementSampling, cancelElementSampling, stopElementSampling, installPanel };
+window.__crawlHub = { analyzePage, collectPageData, detectPaginationState, detectProductOpportunityTable, detectCollectionPageType, collectProductOpportunityData, scanProductOpportunityScroll, scanProductOpportunityBindingIndex, locateProductOpportunityKeyword, isTrendingKeywordsOpportunityPage, collectCurrentPage, clearCollectionData, collectionCsv, collectionXlsx, collectionProjectData, exportCollectionProject, saveCollectionTemplate, startNetworkObserver, startElementSampling, pauseElementSampling, resumeElementSampling, cancelElementSampling, stopElementSampling, installPanel };
 
 restoreCollectionSession();
 try {
