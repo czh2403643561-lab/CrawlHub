@@ -1084,6 +1084,37 @@ function clearCollectionData() {
   return { cleared: true };
 }
 
+function productOpportunityTaskIdentity() {
+  return collectionTaskIdentity({ category_full: "商品机会", category_short: "商品机会", rank_type: "热门关键词" });
+}
+
+function isProductOpportunitySnapshot(snapshot) {
+  return snapshot?.source_type === "product_opportunity" || snapshot?.result?.source_type === "product_opportunity";
+}
+
+function resetProductOpportunityCollectionSession() {
+  const scrollContainer = findProductOpportunityScrollContainer();
+  if (scrollContainer) scrollContainer.scrollTop = 0;
+  const identity = productOpportunityTaskIdentity();
+  clearActiveTaskView();
+  delete window.__crawlHubCollectionSourceType;
+  delete window.__crawlHubCurrentProjectId;
+  delete window.__crawlHubOpportunityScrollContainer;
+  delete window.__crawlHubOpportunityScrollContainerTarget;
+  window.__crawlHubCollectionBusy = false;
+  const sessions = readCollectionTaskSessions();
+  delete sessions.tasks[identity.task_id];
+  if (sessions.active_task_id === identity.task_id) sessions.active_task_id = null;
+  writeCollectionTaskSessions(sessions);
+  return identity;
+}
+
+function startFreshProductOpportunityTask() {
+  const identity = resetProductOpportunityCollectionSession();
+  window.__crawlHubActiveTask = { ...identity, status: "active", collected_count: 0 };
+  return identity;
+}
+
 async function saveCurrentTaskStatus(status) {
   const task = window.__crawlHubActiveTask;
   const result = window.__crawlHubCollectionPreview;
@@ -1279,14 +1310,25 @@ function collectionExportValue(value) {
 
 function restoreCollectionSession() {
   try {
+    if (detectCollectionPageType() === "product_opportunity") return false;
     const sessions = readCollectionTaskSessions();
     const activeTaskId = sessions.active_task_id;
     const saved = activeTaskId ? sessions.tasks[activeTaskId] : null;
     if (saved?.url === location.href) {
+      if (isProductOpportunitySnapshot(saved)) {
+        delete sessions.tasks[activeTaskId];
+        sessions.active_task_id = null;
+        writeCollectionTaskSessions(sessions);
+        return false;
+      }
       return applyCollectionTaskSnapshot(collectionTaskIdentity(saved.result?.metadata || {}), saved, saved.status || "active");
     }
     const legacy = JSON.parse(sessionStorage.getItem("crawlHub.collection.session.v1") || "null");
     if (legacy?.url === location.href && legacy.result && Array.isArray(legacy.pages)) {
+      if (isProductOpportunitySnapshot(legacy)) {
+        sessionStorage.removeItem("crawlHub.collection.session.v1");
+        return false;
+      }
       const identity = collectionTaskIdentity(legacy.result.metadata || {});
       const migrated = { ...legacy, task_id: identity.task_id, status: "active" };
       sessions.active_task_id = identity.task_id;
@@ -2403,7 +2445,7 @@ function installPanel() {
       ? `正在滚动采集 · 已采集 ${opportunityCollectionCount} 条`
       : opportunityCollectionState === "completed"
       ? `采集完成 · 总数量 ${opportunityCollectionCount} 条`
-      : "等待采集";
+      : `准备采集 · 已采集 ${opportunityCollectionCount} 条`;
     const rankUserState = window.__crawlHubCollectionBusy
       ? "正在采集"
       : activeTask?.status === "paused" || activeTask?.status === "cancelled"
@@ -2531,15 +2573,11 @@ function installPanel() {
     if (checkedDetectedTaskChange || detectCollectionPageType() !== "product_opportunity") return;
     checkedDetectedTaskChange = true;
     setMode("collection");
-    const metadata = { category_full: "商品机会", category_short: "商品机会", rank_type: "热门关键词" };
-    const nextTask = collectionTaskIdentity(metadata);
-    const currentTask = window.__crawlHubActiveTask;
-    if (!currentTask || currentTask.task_id === nextTask.task_id) return;
-    await activateCollectionTask(nextTask, metadata);
+    resetProductOpportunityCollectionSession();
     opportunityCollectionState = "idle";
     opportunityCollectionCount = 0;
     renderCollection();
-    setMessage("已创建商品机会采集任务，等待开始。", "success");
+    setMessage("已识别商品机会页面，准备开始新的采集。", "success");
   };
   const setMode = (mode) => {
     window.__crawlHubMode = mode;
@@ -2619,8 +2657,9 @@ function installPanel() {
           await reconnectPage();
           return;
         }
+        startFreshProductOpportunityTask();
         opportunityCollectionState = "active";
-        opportunityCollectionCount = window.__crawlHubCollectionPreview?.item_count || 0;
+        opportunityCollectionCount = 0;
         window.__crawlHubCollectionBusy = true;
         renderCollection();
         setMessage(`正在滚动采集，已采集 ${opportunityCollectionCount} 条…`);
@@ -2745,14 +2784,18 @@ function installPanel() {
     }
   });
   clearCollectionDataButton.addEventListener("click", () => {
+    if (detectCollectionPageType() === "product_opportunity") {
+      resetProductOpportunityCollectionSession();
+      opportunityCollectionState = "idle";
+      opportunityCollectionCount = 0;
+      renderCollection();
+      setMessage("商品机会采集数据已清除，可以从 0 开始新的采集。", "success");
+      return;
+    }
     if (!window.__crawlHubCollectionPreview && !window.__crawlHubManualCollectionPages?.length) return;
     const confirmed = window.confirm("确认清除当前采集结果？\n\n将删除：\n- 已采集数据\n- 当前进度\n\n不会删除字段模板。");
     if (!confirmed) return;
     clearCollectionData();
-    if (detectCollectionPageType() === "product_opportunity") {
-      opportunityCollectionState = "idle";
-      opportunityCollectionCount = 0;
-    }
     renderCollection();
     setMessage("采集数据已清除，字段模板已保留。", "success");
   });
