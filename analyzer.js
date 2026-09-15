@@ -1008,7 +1008,7 @@ function findProductOpportunityRowForEntry(detected, container, entry) {
   }) || null;
 }
 
-async function scanProductOpportunityBindingIndex(onProgress = null) {
+async function scanProductOpportunityBindingIndex(onProgress = null, scanControl = window.__crawlHubBindingScanControl) {
   const detected = detectProductOpportunityTable();
   if (!isTrendingKeywordsOpportunityPage() || !detected) throw new Error("请先打开 TikTok 商品机会的“热门关键词”页面。");
   const container = findProductOpportunityScrollContainer(detected);
@@ -1017,6 +1017,7 @@ async function scanProductOpportunityBindingIndex(onProgress = null) {
   if (keywordColumn < 0) throw new Error("当前页面未找到关键词列。");
   const entries = [];
   const seen = new Set();
+  let controlPhase = "scanning";
   const updateProgress = (phase) => {
     window.__crawlHubBindingSession = {
       state: "scanning",
@@ -1026,6 +1027,20 @@ async function scanProductOpportunityBindingIndex(onProgress = null) {
       scanned_at: Date.now()
     };
     if (onProgress) onProgress();
+  };
+  const shouldContinue = async () => {
+    while (scanControl?.paused) {
+      if (controlPhase !== "paused") {
+        controlPhase = "paused";
+        updateProgress("paused");
+      }
+      await waitForPageUpdate(200);
+    }
+    if (scanControl && controlPhase !== "scanning") {
+      controlPhase = "scanning";
+      updateProgress("scanning");
+    }
+    return !scanControl?.cancelled;
   };
   const collectCurrentRows = () => {
     const scrollTop = container.scrollTop;
@@ -1050,6 +1065,7 @@ async function scanProductOpportunityBindingIndex(onProgress = null) {
       return { total_count: entries.length, added_count: entries.length - countBeforeCollect };
     },
     onProgress: ({ phase, total_count: totalCount }) => updateProgress(phase, totalCount),
+    shouldContinue,
     restoreScrollPosition: true
   });
   if (!scanResult.completed) throw new Error("未能确认商品机会列表已滚动到底部，请稍后重试。");
@@ -2638,6 +2654,7 @@ function installPanel() {
             <div id="bindingScanState" class="binding-status">尚未扫描</div>
             <div id="bindingLoaded" class="binding-count" hidden>已加载：0</div>
             <div class="actions" style="margin-top: 9px;"><button id="scanBinding" type="button">扫描商品机会</button></div>
+            <div class="actions" style="margin-top: 7px;"><button id="pause_scan_task" class="secondary" type="button" hidden>暂停扫描</button></div>
             <div id="bindingSearch" class="binding-search" hidden>
               <input id="bindingKeyword" class="binding-input" type="text" autocomplete="off" placeholder="请输入完整关键词" />
               <div class="actions" style="margin-top: 9px;"><button id="locateBinding" type="button">定位并打开</button></div>
@@ -2662,6 +2679,7 @@ function installPanel() {
   const bindingModeButton = shadow.querySelector("#bindingMode");
   const bindingKeywordInput = shadow.querySelector("#bindingKeyword");
   const bindingScanButton = shadow.querySelector("#scanBinding");
+  const pauseScanTaskButton = shadow.querySelector("#pause_scan_task");
   const bindingScanState = shadow.querySelector("#bindingScanState");
   const bindingLoaded = shadow.querySelector("#bindingLoaded");
   const bindingSearch = shadow.querySelector("#bindingSearch");
@@ -2900,30 +2918,37 @@ function installPanel() {
   };
   const renderBinding = () => {
     const session = window.__crawlHubBindingSession;
+    const scanControl = window.__crawlHubBindingScanControl;
     bindingScanButton.disabled = bindingScanBusy;
     bindingLocateButton.disabled = bindingLocateBusy;
     if (!session) {
       bindingScanState.textContent = "尚未扫描";
       bindingLoaded.hidden = true;
+      pauseScanTaskButton.hidden = true;
       bindingSearch.hidden = true;
       return;
     }
     if (session.state === "scanning") {
-      bindingScanState.textContent = session.phase === "loading" ? "正在加载更多..." : "正在扫描商品机会...";
+      bindingScanState.textContent = session.phase === "paused" ? "扫描已暂停" : session.phase === "loading" ? "正在加载更多..." : "正在扫描商品机会...";
       bindingLoaded.hidden = false;
       bindingLoaded.textContent = `已发现：${session.loaded_count || 0}`;
+      pauseScanTaskButton.hidden = !scanControl?.active;
+      pauseScanTaskButton.textContent = session.phase === "paused" ? "继续扫描" : "暂停扫描";
+      pauseScanTaskButton.disabled = false;
       bindingSearch.hidden = true;
       return;
     }
     if (session.state === "error") {
       bindingScanState.textContent = session.error || "暂时无法扫描商品机会。";
       bindingLoaded.hidden = true;
+      pauseScanTaskButton.hidden = true;
       bindingSearch.hidden = true;
       return;
     }
     bindingScanState.textContent = "扫描完成";
     bindingLoaded.hidden = false;
     bindingLoaded.textContent = `已发现：${session.loaded_count} 个商品机会`;
+    pauseScanTaskButton.hidden = true;
     bindingSearch.hidden = false;
   };
   const reconnectPage = async () => {
@@ -3013,19 +3038,33 @@ function installPanel() {
   bindingScanButton.addEventListener("click", async () => {
     if (bindingScanBusy) return;
     bindingScanBusy = true;
+    const scanControl = { active: true, paused: false, cancelled: false };
+    window.__crawlHubBindingScanControl = scanControl;
     bindingKeywordInput.value = "";
     bindingLocateState.textContent = "";
     window.__crawlHubBindingSession = { state: "scanning", entries: [], loaded_count: 0 };
     renderBinding();
     await waitForPageUpdate(0);
     try {
-      await scanProductOpportunityBindingIndex(renderBinding);
+      await scanProductOpportunityBindingIndex(renderBinding, scanControl);
     } catch (error) {
       window.__crawlHubBindingSession = { state: "error", entries: [], loaded_count: 0, error: error.message || "暂时无法扫描商品机会。" };
     } finally {
+      scanControl.active = false;
+      scanControl.paused = false;
       bindingScanBusy = false;
       renderBinding();
     }
+  });
+  pauseScanTaskButton.addEventListener("click", () => {
+    const scanControl = window.__crawlHubBindingScanControl;
+    if (!scanControl?.active) return;
+    scanControl.paused = !scanControl.paused;
+    const session = window.__crawlHubBindingSession;
+    if (session?.state === "scanning") {
+      session.phase = scanControl.paused ? "paused" : "scanning";
+    }
+    renderBinding();
   });
   bindingLocateButton.addEventListener("click", async () => {
     const keyword = compactOpportunityText(bindingKeywordInput.value);
