@@ -868,42 +868,104 @@ function productOpportunityRows(detected, container = findProductOpportunityScro
     .filter((row) => {
       const cells = Array.from(row.children).filter(isVisiblePageElement);
       return cells.length >= expectedColumns && cells.length <= expectedColumns + 3;
-    });
+  });
+}
+
+function productOpportunityColumnIndexes(detected) {
+  return {
+    keyword: detected.headers.findIndex((header) => normalizeOpportunityText(header) === normalizeOpportunityText("关键词")),
+    category: detected.headers.findIndex((header) => normalizeOpportunityText(header) === normalizeOpportunityText("类目")),
+    action: detected.headers.findIndex((header) => normalizeOpportunityText(header) === normalizeOpportunityText("操作"))
+  };
 }
 
 function waitForPageUpdate(milliseconds = 180) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function scanProductOpportunityBindingIndex() {
+function findProductOpportunityRowForEntry(detected, container, entry) {
+  const { keyword: keywordColumn, category: categoryColumn } = productOpportunityColumnIndexes(detected);
+  if (keywordColumn < 0) return null;
+  return productOpportunityRows(detected, container).find((row) => {
+    const cells = Array.from(row.children).filter(isVisiblePageElement);
+    const keyword = compactOpportunityText(cells[keywordColumn]?.innerText || cells[keywordColumn]?.textContent || "");
+    const category = categoryColumn >= 0 ? compactOpportunityText(cells[categoryColumn]?.innerText || cells[categoryColumn]?.textContent || "") : "";
+    return normalizeOpportunityKeyword(keyword) === entry.normalized_keyword && category === entry.category;
+  }) || null;
+}
+
+async function scanProductOpportunityBindingIndex(onProgress = null) {
   const detected = detectProductOpportunityTable();
   if (!isTrendingKeywordsOpportunityPage() || !detected) throw new Error("请先打开 TikTok 商品机会的“热门关键词”页面。");
   const container = findProductOpportunityScrollContainer(detected);
   if (!container) throw new Error("未找到热门关键词列表的可滚动区域。");
-  const { keyword: keywordColumn, category: categoryColumn } = {
-    keyword: detected.headers.findIndex((header) => normalizeOpportunityText(header) === normalizeOpportunityText("关键词")),
-    category: detected.headers.findIndex((header) => normalizeOpportunityText(header) === normalizeOpportunityText("类目"))
-  };
+  const { keyword: keywordColumn, category: categoryColumn } = productOpportunityColumnIndexes(detected);
   if (keywordColumn < 0) throw new Error("当前页面未找到关键词列。");
-  const entries = productOpportunityRows(detected, container).flatMap((row, rowIndex) => {
-    const cells = Array.from(row.children).filter(isVisiblePageElement);
-    const keyword = compactOpportunityText(cells[keywordColumn]?.innerText || cells[keywordColumn]?.textContent || "");
-    if (!keyword) return [];
-    return [{
-      keyword,
-      normalized_keyword: normalizeOpportunityKeyword(keyword),
-      category: categoryColumn >= 0 ? compactOpportunityText(cells[categoryColumn]?.innerText || cells[categoryColumn]?.textContent || "") : "",
-      row,
-      row_index: rowIndex,
-      container
-    }];
-  });
-  window.__crawlHubBindingSession = {
-    state: "completed",
-    entries,
-    loaded_count: entries.length,
-    scanned_at: Date.now()
+  const originalScrollTop = container.scrollTop;
+  const entries = [];
+  const seen = new Set();
+  const updateProgress = (phase) => {
+    window.__crawlHubBindingSession = {
+      state: "scanning",
+      phase,
+      entries,
+      loaded_count: entries.length,
+      scanned_at: Date.now()
+    };
+    if (onProgress) onProgress();
   };
+  const collectCurrentRows = () => {
+    const scrollTop = container.scrollTop;
+    productOpportunityRows(detected, container).forEach((row, rowIndex) => {
+      const cells = Array.from(row.children).filter(isVisiblePageElement);
+      const keyword = compactOpportunityText(cells[keywordColumn]?.innerText || cells[keywordColumn]?.textContent || "");
+      if (!keyword) return;
+      const category = categoryColumn >= 0 ? compactOpportunityText(cells[categoryColumn]?.innerText || cells[categoryColumn]?.textContent || "") : "";
+      const normalizedKeyword = normalizeOpportunityKeyword(keyword);
+      const entryKey = `${normalizedKeyword}\u0000${category}`;
+      if (seen.has(entryKey)) return;
+      seen.add(entryKey);
+      entries.push({ keyword, normalized_keyword: normalizedKeyword, category, row, row_index: rowIndex, scroll_top: scrollTop, container });
+    });
+  };
+
+  container.scrollTop = 0;
+  await waitForPageUpdate(180);
+  let stableBottomRounds = 0;
+  const step = Math.max(240, Math.floor(container.clientHeight * 0.8));
+  for (let attempt = 0; attempt < 240; attempt += 1) {
+    collectCurrentRows();
+    updateProgress("scanning");
+    const maximumScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+    const currentScrollTop = container.scrollTop;
+    if (currentScrollTop < maximumScrollTop - 2) {
+      container.scrollTop = Math.min(currentScrollTop + step, maximumScrollTop);
+      stableBottomRounds = 0;
+      updateProgress("loading");
+      await waitForPageUpdate(1200);
+      continue;
+    }
+
+    const heightBeforeLoad = container.scrollHeight;
+    const countBeforeLoad = entries.length;
+    updateProgress("loading");
+    await waitForPageUpdate(1200);
+    collectCurrentRows();
+    updateProgress("scanning");
+    const maximumScrollTopAfterLoad = Math.max(0, container.scrollHeight - container.clientHeight);
+    if (maximumScrollTopAfterLoad > maximumScrollTop + 8 || container.scrollTop < maximumScrollTopAfterLoad - 2
+      || container.scrollHeight > heightBeforeLoad + 8 || entries.length > countBeforeLoad) {
+      stableBottomRounds = 0;
+      continue;
+    }
+    stableBottomRounds += 1;
+    if (stableBottomRounds >= 2) break;
+  }
+
+  container.scrollTop = originalScrollTop;
+  await waitForPageUpdate(180);
+  window.__crawlHubBindingSession = { state: "completed", entries, loaded_count: entries.length, scanned_at: Date.now() };
+  if (onProgress) onProgress();
   return window.__crawlHubBindingSession;
 }
 
@@ -913,18 +975,69 @@ async function locateProductOpportunityKeyword(keyword) {
   const normalizedKeyword = normalizeOpportunityKeyword(keyword);
   const entry = session.entries.find((item) => item.normalized_keyword === normalizedKeyword);
   if (!entry) throw new Error("未找到该商品机会关键词。");
-  if (!document.documentElement.contains(entry.row)) throw new Error("页面内容已变化，请重新扫描商品机会。");
-  entry.row.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" });
+  const detected = detectProductOpportunityTable();
+  if (!detected) throw new Error("当前页面已不是商品机会页面，请重新扫描。");
+  const container = findProductOpportunityScrollContainer(detected);
+  if (!container) throw new Error("未找到热门关键词列表的可滚动区域。");
+  let row = document.documentElement.contains(entry.row) ? entry.row : null;
+  if (!row) {
+    container.scrollTop = entry.scroll_top;
+    await waitForPageUpdate(1200);
+    row = findProductOpportunityRowForEntry(detected, container, entry);
+  }
+  if (!row) throw new Error("页面内容已变化，请重新扫描商品机会。");
+  entry.row = row;
+  entry.container = container;
+  row.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" });
   await waitForPageUpdate(80);
-  const rowRect = entry.row.getBoundingClientRect();
-  const containerRect = entry.container.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
+  const containerRect = container.getBoundingClientRect();
   if (rowRect.top < containerRect.top || rowRect.bottom > containerRect.bottom) {
-    entry.container.scrollTop += rowRect.top < containerRect.top
+    container.scrollTop += rowRect.top < containerRect.top
       ? rowRect.top - containerRect.top
       : rowRect.bottom - containerRect.bottom;
     await waitForPageUpdate(80);
   }
   return entry;
+}
+
+function findProductOpportunityMenuTrigger(row, detected) {
+  const { action: actionColumn } = productOpportunityColumnIndexes(detected);
+  const cells = Array.from(row.children).filter(isVisiblePageElement);
+  const actionCell = actionColumn >= 0 ? cells[actionColumn] : null;
+  if (!actionCell) return null;
+  const controls = Array.from(actionCell.querySelectorAll("button, [role='button'], [tabindex]"))
+    .filter(isVisiblePageElement);
+  return controls.find((control) => /^(?:\.{3}|…|⋯)$/.test(compactOpportunityText(control.innerText || control.textContent || "")))
+    || controls.find((control) => /更多|more|menu|action|ellipsis|三点/i.test([
+      control.getAttribute("aria-label"), control.getAttribute("title"), control.getAttribute("data-tooltip"), control.innerText, control.textContent
+    ].join(" ")))
+    || controls.find((control) => !compactOpportunityText(control.innerText || control.textContent || "") && Boolean(control.querySelector("svg, img")))
+    || null;
+}
+
+function findVisibleBindingMenuItem() {
+  const matches = Array.from(document.body?.querySelectorAll("*") || [])
+    .filter(isVisiblePageElement)
+    .filter((element) => compactOpportunityText(element.innerText || element.textContent || "") === "绑定现有商品")
+    .filter((element) => !Array.from(element.children).some((child) => compactOpportunityText(child.innerText || child.textContent || "") === "绑定现有商品"));
+  const item = matches[0] || null;
+  return item?.closest("button, [role='menuitem'], [role='button'], [tabindex]") || item;
+}
+
+async function openExistingProductBinding(keyword) {
+  const entry = await locateProductOpportunityKeyword(keyword);
+  const trigger = findProductOpportunityMenuTrigger(entry.row, detectProductOpportunityTable());
+  if (!trigger) throw new Error("未在该关键词行的操作区域找到三点菜单。");
+  trigger.click();
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await waitForPageUpdate(100);
+    const menuItem = findVisibleBindingMenuItem();
+    if (!menuItem) continue;
+    menuItem.click();
+    return entry;
+  }
+  throw new Error("三点菜单已打开，但未找到“绑定现有商品”。");
 }
 
 function collectProductOpportunityData() {
@@ -2438,7 +2551,7 @@ function installPanel() {
             <div class="actions" style="margin-top: 9px;"><button id="scanBinding" type="button">扫描商品机会</button></div>
             <div id="bindingSearch" class="binding-search" hidden>
               <input id="bindingKeyword" class="binding-input" type="text" autocomplete="off" placeholder="请输入完整关键词" />
-              <div class="actions" style="margin-top: 9px;"><button id="locateBinding" type="button">定位</button></div>
+              <div class="actions" style="margin-top: 9px;"><button id="locateBinding" type="button">定位并打开</button></div>
               <div id="bindingLocateState" class="binding-status"></div>
             </div>
           </div>
@@ -2707,9 +2820,9 @@ function installPanel() {
       return;
     }
     if (session.state === "scanning") {
-      bindingScanState.textContent = "正在扫描商品机会...";
+      bindingScanState.textContent = session.phase === "loading" ? "正在加载更多..." : "正在扫描商品机会...";
       bindingLoaded.hidden = false;
-      bindingLoaded.textContent = `已加载：${session.loaded_count || 0}`;
+      bindingLoaded.textContent = `已发现：${session.loaded_count || 0}`;
       bindingSearch.hidden = true;
       return;
     }
@@ -2817,7 +2930,7 @@ function installPanel() {
     renderBinding();
     await waitForPageUpdate(0);
     try {
-      scanProductOpportunityBindingIndex();
+      await scanProductOpportunityBindingIndex(renderBinding);
     } catch (error) {
       window.__crawlHubBindingSession = { state: "error", entries: [], loaded_count: 0, error: error.message || "暂时无法扫描商品机会。" };
     } finally {
@@ -2836,8 +2949,10 @@ function installPanel() {
     bindingLocateState.textContent = "正在定位...";
     renderBinding();
     try {
-      const entry = await locateProductOpportunityKeyword(keyword);
-      bindingLocateState.textContent = entry.category ? `已定位：${entry.keyword}（${entry.category}）` : `已定位：${entry.keyword}`;
+      const entry = await openExistingProductBinding(keyword);
+      bindingLocateState.textContent = entry.category
+        ? `已打开：${entry.keyword}（${entry.category}）的绑定入口`
+        : `已打开：${entry.keyword}的绑定入口`;
     } catch (error) {
       bindingLocateState.textContent = error.message || "未找到该商品机会关键词。";
     } finally {
