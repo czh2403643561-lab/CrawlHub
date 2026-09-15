@@ -1972,7 +1972,7 @@ function installPanel() {
       :host { all: initial; }
       * { box-sizing: border-box; }
       .panel { overflow: hidden; border: 1px solid #d9e0ed; border-radius: 10px; background: #f6f8fc; box-shadow: 0 8px 30px rgba(16, 24, 40, .22); }
-      header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; color: #fff; background: #315efb; }
+      header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; color: #fff; background: #315efb; cursor: move; user-select: none; }
       header strong { flex: 1; font-size: 14px; }
       header button { width: 24px; height: 24px; border: 0; border-radius: 5px; color: #fff; background: rgba(255,255,255,.18); cursor: pointer; font-size: 16px; line-height: 20px; }
       header button.settings { font-size: 14px; }
@@ -2099,6 +2099,40 @@ function installPanel() {
   const observeButton = shadow.querySelector("#observe");
   const analyzeButton = shadow.querySelector("#analyze");
   const message = shadow.querySelector("#message");
+  const header = shadow.querySelector("header");
+  const dragState = { active: false, offsetX: 0, offsetY: 0, htmlUserSelect: "", bodyUserSelect: "" };
+  const stopPanelDrag = () => {
+    if (!dragState.active) return;
+    dragState.active = false;
+    document.documentElement.style.userSelect = dragState.htmlUserSelect;
+    if (document.body) document.body.style.userSelect = dragState.bodyUserSelect;
+    document.removeEventListener("mousemove", movePanel);
+    document.removeEventListener("mouseup", stopPanelDrag);
+  };
+  const movePanel = (event) => {
+    if (!dragState.active) return;
+    const maxLeft = Math.max(0, window.innerWidth - host.offsetWidth);
+    const maxTop = Math.max(0, window.innerHeight - host.offsetHeight);
+    host.style.left = `${Math.min(Math.max(0, event.clientX - dragState.offsetX), maxLeft)}px`;
+    host.style.top = `${Math.min(Math.max(0, event.clientY - dragState.offsetY), maxTop)}px`;
+  };
+  header.addEventListener("mousedown", (event) => {
+    if (event.button !== 0 || (event.target instanceof Element && event.target.closest("button"))) return;
+    const rect = host.getBoundingClientRect();
+    dragState.active = true;
+    dragState.offsetX = event.clientX - rect.left;
+    dragState.offsetY = event.clientY - rect.top;
+    dragState.htmlUserSelect = document.documentElement.style.userSelect;
+    dragState.bodyUserSelect = document.body?.style.userSelect || "";
+    document.documentElement.style.userSelect = "none";
+    if (document.body) document.body.style.userSelect = "none";
+    host.style.left = `${rect.left}px`;
+    host.style.top = `${rect.top}px`;
+    host.style.right = "auto";
+    event.preventDefault();
+    document.addEventListener("mousemove", movePanel);
+    document.addEventListener("mouseup", stopPanelDrag);
+  });
 
   const setMessage = (text, kind = "") => {
     message.textContent = text;
@@ -2418,6 +2452,7 @@ function installPanel() {
     content.hidden = !content.hidden;
   });
   shadow.querySelector("#close").addEventListener("click", () => {
+    stopPanelDrag();
     stopElementSampling();
     host.remove();
     delete window.__crawlHubPanelHost;
