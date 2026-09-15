@@ -2208,7 +2208,6 @@ function installPanel() {
       .opportunity-summary li { padding: 3px 6px; border-radius: 4px; color: #16794c; background: #d1fadf; font-size: 12px; }
       .collection-advanced { margin: 9px 0; color: #475467; }
       .collection-advanced summary { cursor: pointer; color: #344054; font-weight: 600; }
-      .collection-advanced.rank-diagnostics > summary { display: none; }
       .collection-fields { max-height: 84px; margin: 0; padding: 0; overflow: auto; list-style: none; }
       .collection-fields li { margin-top: 4px; border-radius: 5px; padding: 5px 7px; background: #f6f8fc; overflow-wrap: anywhere; font-size: 12px; }
       .collection-fields li:first-child { margin-top: 0; }
@@ -2249,6 +2248,7 @@ function installPanel() {
           <div class="collection-card">
             <strong id="collectionTitle">当前页数据提取验证</strong>
             <p id="collectionHint">根据表头和行列关系生成字段模板，提取当前已加载的表格或列表数据。</p>
+            <div id="rankSummary" class="opportunity-summary" hidden><p>✓ 页面已识别</p><p>页面：TikTok 热卖商品榜</p><p id="rankType">当前榜单：未识别</p><p>采集模式：分页采集</p><p id="rankState">状态：等待采集</p></div>
             <div id="opportunitySummary" class="opportunity-summary" hidden><p>✓ 页面已识别</p><p>页面：TikTok 商品机会 - 热门关键词</p><p id="opportunityState">状态：等待采集</p><strong>已识别字段：</strong><ul><li>关键词</li><li>类目</li><li>线索来源</li><li>搜索次数</li><li>在售商品</li></ul></div>
             <details id="collectionAdvanced" class="collection-advanced"><summary>高级信息</summary><div id="collectionDiagnostics">
               <div id="collectionState" class="collection-meta">尚未采集</div>
@@ -2285,6 +2285,9 @@ function installPanel() {
   const collectionModeButton = shadow.querySelector("#collectionMode");
   const collectionTitle = shadow.querySelector("#collectionTitle");
   const collectionHint = shadow.querySelector("#collectionHint");
+  const rankSummary = shadow.querySelector("#rankSummary");
+  const rankType = shadow.querySelector("#rankType");
+  const rankState = shadow.querySelector("#rankState");
   const opportunitySummary = shadow.querySelector("#opportunitySummary");
   const opportunityState = shadow.querySelector("#opportunityState");
   const collectionAdvanced = shadow.querySelector("#collectionAdvanced");
@@ -2384,34 +2387,59 @@ function installPanel() {
     const activeTask = window.__crawlHubActiveTask;
     const pageType = detectCollectionPageType();
     const isOpportunity = pageType === "product_opportunity";
+    const visibleRankType = () => {
+      const labels = ["总榜", "直播榜", "短视频榜", "商品卡", "达人榜", "新品榜"];
+      return Array.from(document.querySelectorAll("[role='tab'], button, a, [class*='tab']")).find((element) => {
+        const text = String(element.innerText || element.textContent || "").replace(/\s+/g, " ").trim();
+        if (!labels.includes(text)) return false;
+        for (let current = element, depth = 0; current && depth < 3; current = current.parentElement, depth += 1) {
+          if (current.getAttribute("aria-selected") === "true" || current.getAttribute("aria-current") === "page" || /(?:^|[-_\s])(active|selected|current)(?:$|[-_\s])/i.test(String(current.className || ""))) return true;
+        }
+        return false;
+      })?.textContent?.replace(/\s+/g, " ").trim() || null;
+    };
     const opportunityStateLabel = opportunityCollectionState === "active" ? "采集中" : opportunityCollectionState === "paused" ? "已暂停" : opportunityCollectionState === "completed" ? "已完成" : opportunityCollectionState === "stopped" ? "已停止" : "待开始";
     const opportunityUserState = opportunityCollectionState === "active"
       ? `正在滚动采集 · 已采集 ${opportunityCollectionCount} 条`
       : opportunityCollectionState === "completed"
       ? `采集完成 · 总数量 ${opportunityCollectionCount} 条`
       : "等待采集";
+    const rankUserState = window.__crawlHubCollectionBusy
+      ? "正在采集"
+      : activeTask?.status === "paused" || activeTask?.status === "cancelled"
+      ? "等待采集"
+      : result ? "已完成" : "等待采集";
+    rankSummary.hidden = isOpportunity;
     opportunitySummary.hidden = !isOpportunity;
-    collectionTitle.hidden = isOpportunity;
-    collectionHint.hidden = isOpportunity;
-    collectionAdvanced.classList.toggle("rank-diagnostics", !isOpportunity);
+    collectionTitle.hidden = true;
+    collectionHint.hidden = true;
+    collectionAdvanced.classList.remove("rank-diagnostics");
+    if (!isOpportunity) {
+      rankType.textContent = `当前榜单：${visibleRankType() || activeTask?.rank_type || result?.metadata?.rank_type || "未识别"}`;
+      rankState.textContent = `状态：${rankUserState}`;
+    }
     if (isOpportunity) opportunityState.textContent = `状态：${opportunityUserState}`;
-    if (previousCollectionPageType !== pageType) collectionAdvanced.open = !isOpportunity;
+    if (previousCollectionPageType !== pageType) collectionAdvanced.open = false;
     previousCollectionPageType = pageType;
-    collectCollectionButton.textContent = isOpportunity ? "开始采集" : "采集当前页";
+    collectCollectionButton.textContent = "开始采集";
     collectCollectionButton.disabled = Boolean(window.__crawlHubCollectionBusy);
-    saveCollectionTemplateButton.hidden = isOpportunity;
+    saveCollectionTemplateButton.hidden = true;
     const taskStatusLabel = activeTask?.status === "paused" ? "已暂停" : activeTask?.status === "cancelled" ? "已结束" : "采集中";
     taskStatus.textContent = isOpportunity
       ? `当前任务：product_opportunity · ${opportunityStateLabel}`
       : activeTask
       ? `当前任务：${activeTask.label} · ${taskStatusLabel} · 已采集${activeTask.collected_count || result?.item_count || 0}条`
       : "当前任务：未创建";
-    pauseCollectionTaskButton.hidden = isOpportunity ? false : !activeTask || activeTask.status === "cancelled";
-    pauseCollectionTaskButton.textContent = isOpportunity ? opportunityCollectionState === "paused" ? "继续采集" : "暂停" : activeTask?.status === "paused" ? "继续采集" : "暂停采集";
-    pauseCollectionTaskButton.disabled = isOpportunity ? !["active", "paused"].includes(opportunityCollectionState) : Boolean(window.__crawlHubCollectionBusy);
-    cancelCollectionTaskButton.hidden = isOpportunity ? false : !activeTask || activeTask.status === "cancelled";
-    cancelCollectionTaskButton.textContent = isOpportunity ? "停止" : "取消当前任务";
-    cancelCollectionTaskButton.disabled = isOpportunity ? !["active", "paused"].includes(opportunityCollectionState) : Boolean(window.__crawlHubCollectionBusy);
+    pauseCollectionTaskButton.hidden = false;
+    pauseCollectionTaskButton.textContent = isOpportunity ? opportunityCollectionState === "paused" ? "继续采集" : "暂停" : activeTask?.status === "paused" ? "继续采集" : "暂停";
+    pauseCollectionTaskButton.disabled = isOpportunity
+      ? !["active", "paused"].includes(opportunityCollectionState)
+      : Boolean(window.__crawlHubCollectionBusy) || !activeTask || activeTask.status === "cancelled";
+    cancelCollectionTaskButton.hidden = false;
+    cancelCollectionTaskButton.textContent = "停止";
+    cancelCollectionTaskButton.disabled = isOpportunity
+      ? !["active", "paused"].includes(opportunityCollectionState)
+      : Boolean(window.__crawlHubCollectionBusy) || !activeTask || activeTask.status === "cancelled";
     const fieldTemplate = result?.field_template || (isOpportunity ? [] : window.__crawlHubCollectionFieldTemplate || []);
     const pageState = detectPaginationState();
     const pageText = isOpportunity
