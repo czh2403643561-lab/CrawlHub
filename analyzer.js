@@ -1482,6 +1482,12 @@ function createBatchSystemError(message) {
   return error;
 }
 
+function createAlreadyBoundSystemError(message) {
+  const error = createBatchSystemError(message);
+  error.product_already_bound = true;
+  return error;
+}
+
 function isBatchSystemError(error) {
   return Boolean(error?.batch_system)
     || /当前已不在 TikTok 商品机会-热门关键词页面|商品选择页面尚未加载完成|未能回到商品机会主列表/.test(String(error?.message || ""));
@@ -1510,6 +1516,48 @@ function findAutoReportDrawerCloseControl(drawerRoot) {
     }) || null;
 }
 
+function findAutoReportDrawerCloseIcon(drawerRoot) {
+  return Array.from(drawerRoot?.querySelectorAll("svg.arco-icon-close") || [])
+    .find(isVisiblePageElement) || null;
+}
+
+function clickAutoReportDrawerCloseIcon(drawerRoot) {
+  const closeIcon = findAutoReportDrawerCloseIcon(drawerRoot);
+  addAutoReportDebugLog("drawer_close_icon_found", {
+    found: Boolean(closeIcon),
+    close_icon: describeAutoReportElement(closeIcon)
+  });
+  if (!closeIcon) return false;
+  const rect = closeIcon.getBoundingClientRect();
+  const point = {
+    clientX: rect.left + rect.width / 2,
+    clientY: rect.top + rect.height / 2,
+    screenX: window.screenX + rect.left + rect.width / 2,
+    screenY: window.screenY + rect.top + rect.height / 2
+  };
+  const clickTarget = document.elementFromPoint(point.clientX, point.clientY);
+  if (clickTarget) {
+    dispatchAutoReportPointerSequence(clickTarget, point);
+  } else {
+    closeIcon.dispatchEvent(new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX: point.clientX,
+      clientY: point.clientY,
+      screenX: point.screenX,
+      screenY: point.screenY,
+      button: 0
+    }));
+  }
+  addAutoReportDebugLog("drawer_close_clicked", {
+    close_icon: describeAutoReportElement(closeIcon),
+    actual_target: describeAutoReportElement(clickTarget || closeIcon),
+    fallback_to_svg: !clickTarget
+  });
+  return true;
+}
+
 async function waitForBatchOpportunityRecovery(successMessage = null) {
   const recovered = await waitForDomState(() => {
     const messageVisible = successMessage instanceof Element
@@ -1524,9 +1572,12 @@ async function waitForBatchOpportunityRecovery(successMessage = null) {
 async function recoverBatchOpportunityAfterFailure() {
   const drawerRoot = findVisibleAutoReportDrawerRoot();
   if (drawerRoot) {
-    const closeControl = findAutoReportDrawerCloseControl(drawerRoot);
-    if (!closeControl) throw createBatchSystemError("未能关闭当前提报窗口，批量已暂停。");
-    closeControl.click();
+    const closedByIcon = clickAutoReportDrawerCloseIcon(drawerRoot);
+    if (!closedByIcon) {
+      const closeControl = findAutoReportDrawerCloseControl(drawerRoot);
+      if (!closeControl) throw createBatchSystemError("未能关闭当前提报窗口，批量已暂停。");
+      closeControl.click();
+    }
   }
   await waitForBatchOpportunityRecovery();
 }
@@ -1693,6 +1744,20 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null) {
   if (matchingRows.length !== 1) throw new Error("商品 ID 匹配到多条结果，请确认后重试。");
 
   const targetRow = matchingRows[0];
+  if (findVisibleExactTextElement("已绑定", targetRow)) {
+    addAutoReportDebugLog("product_already_bound", { product_id: productId });
+    updateStatus("商品已绑定，正在关闭...");
+    const drawerRoot = findAutoReportStepOneDrawerRoot();
+    if (!drawerRoot) throw createAlreadyBoundSystemError("已识别商品已绑定，但未找到当前提报窗口。");
+    if (!clickAutoReportDrawerCloseIcon(drawerRoot)) throw createAlreadyBoundSystemError("已识别商品已绑定，但未找到右上角关闭图标。");
+    try {
+      await waitForBatchOpportunityRecovery();
+    } catch (error) {
+      throw createAlreadyBoundSystemError(error?.message || "已绑定商品关闭后页面未恢复。");
+    }
+    updateStatus("商品已绑定，已跳过。");
+    return { keyword, product_id: productId, skipped: true, skip_reason: "商品已绑定" };
+  }
   const checkbox = findRowCheckboxControl(targetRow);
   if (!checkbox) throw new Error("该商品暂时无法勾选。");
   updateStatus("正在选择商品...");
@@ -3553,11 +3618,12 @@ function installPanel() {
   const batchReportCounts = () => {
     const tasks = batchReportSession.tasks || [];
     const success = tasks.filter((task) => task.status === "success").length;
+    const skipped = tasks.filter((task) => task.status === "skipped").length;
     const failed = tasks.filter((task) => task.status === "failed").length;
-    return { total: tasks.length, success, failed, completed: success + failed };
+    return { total: tasks.length, success, skipped, failed, completed: success + skipped + failed };
   };
   const renderBatchReport = () => {
-    const { total, success, failed, completed } = batchReportCounts();
+    const { total, success, skipped, failed, completed } = batchReportCounts();
     const running = batchReportSession.state === "running";
     downloadBatchTemplateButton.disabled = running;
     importBatchTasksButton.disabled = running;
@@ -3571,7 +3637,7 @@ function installPanel() {
     batchReportCurrent.hidden = !running;
     if (running) {
       const current = batchReportSession.tasks[batchReportSession.current_index];
-      batchReportState.textContent = `正在处理第 ${batchReportSession.current_index + 1} / ${total} 条\n已完成 ${completed} 条 · 成功 ${success} · 失败 ${failed}`;
+      batchReportState.textContent = `正在处理第 ${batchReportSession.current_index + 1} / ${total} 条\n已完成 ${completed} 条 · 成功 ${success} · 跳过 ${skipped} · 失败 ${failed}`;
       batchReportCurrent.textContent = current
         ? `当前：\n${current.keyword}\n${current.product_id}${batchReportSession.current_status ? `\n${batchReportSession.current_status}` : ""}`
         : "";
@@ -3579,9 +3645,9 @@ function installPanel() {
     }
     batchReportCurrent.textContent = "";
     if (batchReportSession.state === "completed") {
-      batchReportState.textContent = `批量提报完成\n共 ${total} 条 · 成功 ${success} · 失败 ${failed}`;
+      batchReportState.textContent = `批量提报完成\n共 ${total} 条 · 成功 ${success} · 跳过 ${skipped} · 失败 ${failed}`;
     } else if (batchReportSession.state === "paused") {
-      batchReportState.textContent = `批量已暂停\n已完成 ${completed} 条 · 成功 ${success} · 失败 ${failed}\n${batchReportSession.error || "请确认页面后重新导入任务。"}`;
+      batchReportState.textContent = `批量已暂停\n已完成 ${completed} 条 · 成功 ${success} · 跳过 ${skipped} · 失败 ${failed}\n${batchReportSession.error || "请确认页面后重新导入任务。"}`;
     }
   };
   const renderBinding = () => {
@@ -3796,6 +3862,15 @@ function installPanel() {
             batchReportSession.current_status = status;
             renderBinding();
           });
+          if (result.skipped) {
+            task.status = "skipped";
+            task.error = result.skip_reason || "商品已绑定";
+            batchReportSession.current_status = "商品已绑定，已跳过。";
+            addAutoReportDebugLog("batch_item_skipped", { reason: task.error });
+            addAutoReportDebugLog("batch_item_recovered");
+            renderBinding();
+            continue;
+          }
           task.status = "success";
           task.error = "";
           batchReportSession.current_status = "正在返回商品机会列表...";
@@ -3803,6 +3878,15 @@ function installPanel() {
           await waitForBatchOpportunityRecovery(result.success_message);
           addAutoReportDebugLog("batch_item_recovered");
         } catch (error) {
+          if (error?.product_already_bound) {
+            task.status = "skipped";
+            task.error = "商品已绑定";
+            addAutoReportDebugLog("batch_item_skipped", { reason: task.error });
+            addAutoReportDebugLog("error", { message: error.message || "已绑定商品关闭失败。" });
+            batchReportSession.state = "paused";
+            batchReportSession.error = error.message || "已绑定商品关闭失败，批量已暂停。";
+            break;
+          }
           if (task.status === "success") {
             addAutoReportDebugLog("error", { message: error?.message || "提报后页面未恢复。" });
             batchReportSession.state = "paused";
@@ -3988,7 +4072,14 @@ function installPanel() {
     batchImportNotice = "正在下载导入模板...";
     renderBinding();
     try {
-      await projectStorageRequest("crawlHub:download-batch-template");
+      const template = await projectStorageRequest("crawlHub:download-batch-template");
+      if (!template.filename || typeof template.content !== "string") throw new Error("导入模板内容无效。");
+      const blobUrl = URL.createObjectURL(new Blob([template.content], { type: "text/csv;charset=utf-8" }));
+      const anchor = document.createElement("a");
+      anchor.href = blobUrl;
+      anchor.download = template.filename;
+      anchor.click();
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
       batchImportNotice = "导入模板已下载。";
     } catch (error) {
       batchImportNotice = error?.message || "导入模板下载失败。";

@@ -18,12 +18,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
     if (message.type === "crawlHub:ping") return { connected: true };
     if (message.type === "crawlHub:download-batch-template") {
-      const download_id = await chrome.downloads.download({
-        url: chrome.runtime.getURL("templates/CrawlHub_批量提报模板.csv"),
-        filename: "CrawlHub_批量提报模板.csv",
-        saveAs: true
-      });
-      return { download_id };
+      const response = await fetch(chrome.runtime.getURL("templates/CrawlHub_批量提报模板.csv"));
+      if (!response.ok) throw new Error("导入模板读取失败。");
+      return { filename: "CrawlHub_批量提报模板.csv", content: await response.text() };
     }
     const cacheKey = String(message.cache_key || "");
     if (message.type === "crawlHub:read-binding-debug-mode") {
