@@ -1276,12 +1276,15 @@ function findSearchControlForInput(searchInput) {
   return icon?.closest("button, [role='button'], [tabindex]") || suffix;
 }
 
-function triggerSearchForInput(searchInput) {
+function clickSearchControlForInput(searchInput) {
   const searchControl = findSearchControlForInput(searchInput);
-  if (searchControl && isVisiblePageElement(searchControl)) {
-    searchControl.click();
-    return true;
-  }
+  if (!searchControl || !isVisiblePageElement(searchControl)) return false;
+  searchControl.click();
+  return true;
+}
+
+function triggerSearchForInput(searchInput) {
+  if (clickSearchControlForInput(searchInput)) return true;
   searchInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
   searchInput.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true }));
   return false;
@@ -1339,14 +1342,26 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null) {
   updateStatus("正在搜索商品...");
   setNativeInputValue(searchInput, productId);
   if (searchInput.value !== productId) throw new Error("商品 ID 未能写入搜索框，请重试。");
+  await waitForPageUpdate(4000);
   triggerSearchForInput(searchInput);
-  await waitForPageUpdate(350);
-  const stepOneRoot = findAutoReportStepOneRoot(searchInput);
-  const matchingRows = await waitForDomState(() => {
+  const readMatchingRows = () => {
+    const currentInput = document.getElementById("search_content_input");
+    if (!currentInput || !isVisiblePageElement(currentInput)) return null;
+    const stepOneRoot = findAutoReportStepOneRoot(currentInput);
     const rows = Array.from(stepOneRoot.querySelectorAll("tr")).filter(isVisiblePageElement);
     const matches = rows.filter((row) => rowContainsCompleteProductId(row, productId));
     return matches.length ? matches : null;
-  }, { timeout: 12000 });
+  };
+  let matchingRows = await waitForDomState(readMatchingRows, { timeout: 12000 });
+  if (!matchingRows) {
+    const currentInput = document.getElementById("search_content_input");
+    const stillOnStepOne = Boolean(findVisibleExactTextElement("第 1 步：选择商品"));
+    if (stillOnStepOne && currentInput && isVisiblePageElement(currentInput)) {
+      await waitForPageUpdate(2000);
+      if (currentInput.value === productId) clickSearchControlForInput(currentInput);
+      matchingRows = await waitForDomState(readMatchingRows, { timeout: 12000 });
+    }
+  }
   if (!matchingRows) throw new Error("商品搜索结果中没有此商品 ID。");
   if (matchingRows.length !== 1) throw new Error("商品 ID 匹配到多条结果，请确认后重试。");
 
