@@ -1078,15 +1078,18 @@ async function scanProductOpportunityScroll({
   return { stopped, completed, reached_limit: !stopped && !completed, bottom_stable_rounds: bottomStableRounds };
 }
 
-function findProductOpportunityRowForEntry(detected, container, entry) {
+function isProductOpportunityRowForEntry(detected, row, entry) {
   const { keyword: keywordColumn, category: categoryColumn } = productOpportunityColumnIndexes(detected);
-  if (keywordColumn < 0) return null;
-  return productOpportunityRows(detected, container).find((row) => {
-    const cells = Array.from(row.children).filter(isVisiblePageElement);
-    const keyword = compactOpportunityText(cells[keywordColumn]?.innerText || cells[keywordColumn]?.textContent || "");
-    const category = categoryColumn >= 0 ? compactOpportunityText(cells[categoryColumn]?.innerText || cells[categoryColumn]?.textContent || "") : "";
-    return normalizeOpportunityKeyword(keyword) === entry.normalized_keyword && category === entry.category;
-  }) || null;
+  if (keywordColumn < 0 || !(row instanceof Element)) return false;
+  const cells = Array.from(row.children).filter(isVisiblePageElement);
+  const rowKeyword = compactOpportunityText(cells[keywordColumn]?.innerText || cells[keywordColumn]?.textContent || "");
+  const rowCategory = categoryColumn >= 0 ? compactOpportunityText(cells[categoryColumn]?.innerText || cells[categoryColumn]?.textContent || "") : "";
+  return normalizeOpportunityKeyword(rowKeyword) === entry.normalized_keyword && rowCategory === entry.category;
+}
+
+function findProductOpportunityRowForEntry(detected, container, entry) {
+  return productOpportunityRows(detected, container)
+    .find((row) => isProductOpportunityRowForEntry(detected, row, entry)) || null;
 }
 
 async function scanProductOpportunityBindingIndex(onProgress = null, scanControl = window.__crawlHubBindingScanControl) {
@@ -1156,6 +1159,31 @@ async function scanProductOpportunityBindingIndex(onProgress = null, scanControl
   return window.__crawlHubBindingSession;
 }
 
+function productOpportunityRowsSignature(detected, container) {
+  return productOpportunityRows(detected, container)
+    .slice(0, 12)
+    .map((row) => compactOpportunityText(row.innerText || row.textContent || ""))
+    .join(" | ");
+}
+
+async function findProductOpportunityRowNearScrollTop(detected, container, entry, scrollTop) {
+  const maximumScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+  const targetScrollTop = Math.max(0, Math.min(maximumScrollTop, scrollTop));
+  const beforeSignature = productOpportunityRowsSignature(detected, container);
+  const beforeScrollTop = container.scrollTop;
+  container.scrollTop = targetScrollTop;
+  const deadline = Date.now() + 1800;
+  while (Date.now() < deadline) {
+    const row = findProductOpportunityRowForEntry(detected, container, entry);
+    if (row) return row;
+    const domChanged = container.scrollTop !== beforeScrollTop
+      || productOpportunityRowsSignature(detected, container) !== beforeSignature;
+    if (domChanged) await waitForPageUpdate(120);
+    else await waitForPageUpdate(220);
+  }
+  return findProductOpportunityRowForEntry(detected, container, entry);
+}
+
 async function locateProductOpportunityKeyword(keyword) {
   const session = window.__crawlHubBindingSession;
   if (!session || session.state !== "completed") throw new Error("请先扫描商品机会。");
@@ -1166,15 +1194,58 @@ async function locateProductOpportunityKeyword(keyword) {
   if (!detected) throw new Error("当前页面已不是商品机会页面，请重新扫描。");
   const container = findProductOpportunityScrollContainer(detected);
   if (!container) throw new Error("未找到热门关键词列表的可滚动区域。");
-  let row = document.documentElement.contains(entry.row) ? entry.row : null;
+  const cachedScrollTop = Number.isFinite(entry.scroll_top) ? entry.scroll_top : 0;
+  const logDetails = (details = {}) => ({
+    keyword: entry.keyword,
+    category: entry.category,
+    cached_scroll_top: cachedScrollTop,
+    ...details
+  });
+  addAutoReportDebugLog("locate_keyword_start", logDetails());
+  let row = entry.row instanceof Element
+    && document.documentElement.contains(entry.row)
+    && isProductOpportunityRowForEntry(detected, entry.row, entry)
+    ? entry.row
+    : null;
+  if (row) addAutoReportDebugLog("locate_cached_hit", logDetails({ source: "entry_row", attempt_scroll_top: container.scrollTop }));
   if (!row) {
-    container.scrollTop = entry.scroll_top;
-    await waitForPageUpdate(1200);
     row = findProductOpportunityRowForEntry(detected, container, entry);
+    if (row) addAutoReportDebugLog("locate_cached_hit", logDetails({ source: "visible_dom", attempt_scroll_top: container.scrollTop }));
   }
-  if (!row) throw new Error("页面内容已变化，请重新扫描商品机会。");
+  if (!row) {
+    row = await findProductOpportunityRowNearScrollTop(detected, container, entry, cachedScrollTop);
+    if (row) addAutoReportDebugLog("locate_cached_hit", logDetails({ source: "cached_scroll_top", attempt_scroll_top: container.scrollTop }));
+  }
+  if (!row) {
+    addAutoReportDebugLog("locate_cached_miss", logDetails());
+    const viewport = Math.max(1, container.clientHeight);
+    const maximumScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+    const fallbackScrollTops = [
+      cachedScrollTop - viewport * 0.5,
+      cachedScrollTop + viewport * 0.5,
+      cachedScrollTop - viewport,
+      cachedScrollTop + viewport
+    ].map((value) => Math.max(0, Math.min(maximumScrollTop, value)));
+    const attemptedScrollTops = new Set([Math.round(Math.max(0, Math.min(maximumScrollTop, cachedScrollTop)))]);
+    for (const attemptScrollTop of fallbackScrollTops) {
+      const roundedScrollTop = Math.round(attemptScrollTop);
+      if (attemptedScrollTops.has(roundedScrollTop)) continue;
+      attemptedScrollTops.add(roundedScrollTop);
+      addAutoReportDebugLog("locate_fallback_attempt", logDetails({ attempt_scroll_top: attemptScrollTop }));
+      row = await findProductOpportunityRowNearScrollTop(detected, container, entry, attemptScrollTop);
+      if (row) {
+        addAutoReportDebugLog("locate_fallback_found", logDetails({ attempt_scroll_top: container.scrollTop }));
+        break;
+      }
+    }
+  }
+  if (!row) {
+    addAutoReportDebugLog("locate_fallback_failed", logDetails({ attempt_scroll_top: container.scrollTop }));
+    throw new Error("缓存中的商品机会位置已失效，请重新扫描商品机会。");
+  }
   entry.row = row;
   entry.container = container;
+  entry.scroll_top = container.scrollTop;
   row.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" });
   await waitForPageUpdate(80);
   const rowRect = row.getBoundingClientRect();
@@ -1270,16 +1341,34 @@ function resetAutoReportDebugLog() {
   window.__crawlHubAutoReportDebugLog = [];
 }
 
-const BATCH_ITEM_COOLDOWN_MS = 3000;
+const BATCH_ITEM_COOLDOWN_MS = 2000;
+
+function batchItemCooldownSeconds() {
+  return Math.ceil(BATCH_ITEM_COOLDOWN_MS / 1000);
+}
 
 const BATCH_DEBUG_EVENT_NAMES = {
   start: "batch_item_start",
+  locate_keyword_start: "locate_keyword_start",
+  locate_cached_hit: "locate_cached_hit",
+  locate_cached_miss: "locate_cached_miss",
+  locate_fallback_attempt: "locate_fallback_attempt",
+  locate_fallback_found: "locate_fallback_found",
+  locate_fallback_failed: "locate_fallback_failed",
   binding_opened: "binding_opened",
   step_one_ready: "step_one_ready",
   product_id_written: "product_id_written",
   search_click_dispatched: "search_clicked",
   search_result_changed: "search_result_changed",
   product_found: "product_found",
+  target_product_found: "target_product_found",
+  already_bound_first_check: "already_bound_first_check",
+  checkbox_found: "checkbox_found",
+  checkbox_disabled: "checkbox_disabled",
+  checkbox_click_failed: "checkbox_click_failed",
+  already_bound_recheck_start: "already_bound_recheck_start",
+  already_bound_recheck_found: "already_bound_recheck_found",
+  already_bound_recheck_timeout: "already_bound_recheck_timeout",
   product_already_bound: "product_already_bound",
   checkbox_clicked: "checkbox_clicked",
   next_clicked: "next_clicked",
@@ -1538,6 +1627,18 @@ function rowContainsCompleteProductId(row, productId) {
 function findRowCheckboxControl(row) {
   return Array.from(row.querySelectorAll("input[type='checkbox'], [role='checkbox'], label"))
     .find(isVisiblePageElement) || null;
+}
+
+function isAvailableRowCheckboxControl(control) {
+  if (!control || !isVisiblePageElement(control)) return false;
+  const input = control.matches?.("input[type='checkbox']")
+    ? control
+    : control.querySelector?.("input[type='checkbox'], [role='checkbox']");
+  const target = input || control;
+  return !target.disabled
+    && target.getAttribute("disabled") === null
+    && target.getAttribute("aria-disabled") !== "true"
+    && control.getAttribute("aria-disabled") !== "true";
 }
 
 function hasCheckedState(element) {
@@ -1832,9 +1933,30 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null, {
   }
   if (matchingRows.length !== 1) throw new Error("商品 ID 匹配到多条结果，请确认后重试。");
 
-  const targetRow = matchingRows[0];
-  if (findVisibleExactTextElement("已绑定", targetRow)) {
-    addAutoReportDebugLog("product_already_bound", { product_id: productId });
+  let targetRow = matchingRows[0];
+  addAutoReportDebugLog("target_product_found", { product_id: productId });
+  const findCurrentTargetRow = () => {
+    const currentInput = document.getElementById("search_content_input");
+    const stepOneRoot = currentInput && isVisiblePageElement(currentInput) ? findAutoReportStepOneRoot(currentInput) : null;
+    const currentRows = Array.from(stepOneRoot?.querySelectorAll("tr") || []).filter(isVisiblePageElement);
+    const currentMatches = currentRows.filter((row) => rowContainsCompleteProductId(row, productId));
+    if (currentMatches.length === 1) {
+      targetRow = currentMatches[0];
+      return targetRow;
+    }
+    return targetRow instanceof Element
+      && document.documentElement.contains(targetRow)
+      && isVisiblePageElement(targetRow)
+      && rowContainsCompleteProductId(targetRow, productId)
+      ? targetRow
+      : null;
+  };
+  const findAlreadyBoundState = () => {
+    const currentTargetRow = findCurrentTargetRow();
+    return currentTargetRow ? findVisibleExactTextElement("已绑定", currentTargetRow) : null;
+  };
+  const skipAlreadyBound = async (source) => {
+    addAutoReportDebugLog("product_already_bound", { product_id: productId, source });
     updateStatus("商品已绑定，正在关闭...");
     const drawerRoot = findAutoReportStepOneDrawerRoot();
     if (!drawerRoot) throw createAlreadyBoundSystemError("已识别商品已绑定，但未找到当前提报窗口。");
@@ -1850,15 +1972,54 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null, {
     }
     updateStatus("商品已绑定，已跳过。");
     return { keyword, product_id: productId, skipped: true, skip_reason: "商品已绑定" };
+  };
+  const recheckAlreadyBound = async (reason) => {
+    addAutoReportDebugLog("already_bound_recheck_start", { product_id: productId, reason });
+    const boundState = await waitForDomState(findAlreadyBoundState, { timeout: 3000, interval: 200 });
+    if (boundState) {
+      addAutoReportDebugLog("already_bound_recheck_found", { product_id: productId, reason });
+      return true;
+    }
+    addAutoReportDebugLog("already_bound_recheck_timeout", { product_id: productId, reason });
+    return false;
+  };
+  const initiallyBound = findAlreadyBoundState();
+  addAutoReportDebugLog("already_bound_first_check", { product_id: productId, found: Boolean(initiallyBound) });
+  if (initiallyBound) return skipAlreadyBound("first_check");
+
+  let checkbox = findRowCheckboxControl(targetRow);
+  if (!checkbox) {
+    if (await recheckAlreadyBound("checkbox_not_found")) return skipAlreadyBound("checkbox_not_found");
+    throw new Error("该商品暂时无法勾选。");
   }
-  const checkbox = findRowCheckboxControl(targetRow);
-  if (!checkbox) throw new Error("该商品暂时无法勾选。");
+  addAutoReportDebugLog("checkbox_found", { checkbox: describeAutoReportElement(checkbox) });
+  if (!isAvailableRowCheckboxControl(checkbox)) {
+    addAutoReportDebugLog("checkbox_disabled", { checkbox: describeAutoReportElement(checkbox) });
+    if (await recheckAlreadyBound("checkbox_disabled")) return skipAlreadyBound("checkbox_disabled");
+    throw new Error("该商品暂时无法勾选。");
+  }
+  if (findAlreadyBoundState()) {
+    addAutoReportDebugLog("already_bound_recheck_found", { product_id: productId, reason: "before_checkbox_click" });
+    return skipAlreadyBound("before_checkbox_click");
+  }
+  targetRow = findCurrentTargetRow();
+  checkbox = targetRow ? findRowCheckboxControl(targetRow) : null;
+  if (!checkbox || !isAvailableRowCheckboxControl(checkbox)) {
+    if (!checkbox) addAutoReportDebugLog("checkbox_click_failed", { product_id: productId, reason: "checkbox_changed" });
+    else addAutoReportDebugLog("checkbox_disabled", { checkbox: describeAutoReportElement(checkbox), reason: "checkbox_changed" });
+    if (await recheckAlreadyBound("checkbox_changed")) return skipAlreadyBound("checkbox_changed");
+    throw new Error("该商品暂时无法勾选。");
+  }
   updateStatus("正在选择商品...");
   const wasChecked = isProductRowChecked(targetRow);
   if (!wasChecked) checkbox.click();
   addAutoReportDebugLog("checkbox_clicked", { checkbox: describeAutoReportElement(checkbox), was_checked: wasChecked, click_dispatched: !wasChecked });
   const checked = await waitForDomState(() => isProductRowChecked(targetRow));
-  if (!checked) throw new Error("未能确认商品已选中。");
+  if (!checked) {
+    addAutoReportDebugLog("checkbox_click_failed", { product_id: productId, reason: "checked_state_not_confirmed" });
+    if (await recheckAlreadyBound("checked_state_not_confirmed")) return skipAlreadyBound("checked_state_not_confirmed");
+    throw new Error("未能确认商品已选中。");
+  }
   await waitForPageUpdate(350);
 
   const nextButton = await waitForDomState(() => findVisibleTextButton("下一步"));
@@ -3421,11 +3582,11 @@ function installPanel() {
                 <div class="actions" style="margin-top: 9px;"><button id="downloadBatchTemplate" class="secondary" type="button">下载导入模板</button><button id="importBatchTasks" class="secondary" type="button">导入任务文件</button></div>
                 <input id="batchTaskFile" type="file" accept=".csv,text/csv" hidden />
                 <div id="batchImportState" class="binding-status"></div>
-                <div class="actions" style="margin-top: 7px;"><button id="startBatchReport" type="button" hidden>开始批量提报</button><button id="exportBatchResults" class="secondary" type="button" hidden>导出处理结果</button></div>
+                <div class="actions" style="margin-top: 7px;"><button id="startBatchReport" type="button" hidden>开始批量提报</button><button id="exportBatchResults" class="secondary" type="button" hidden>导出处理结果</button><button id="exportBatchDebug" class="secondary" type="button" disabled>导出批量日志</button></div>
                 <div id="batchReportState" class="binding-status" style="white-space: pre-line;" hidden></div>
                 <div id="batchReportCurrent" class="binding-status" style="white-space: pre-line;" hidden></div>
               </div>
-              <details style="margin-top: 12px;"><summary>调试工具 ▸</summary><div class="actions" style="margin-top: 7px;"><button id="exportAutoReportDebug" class="secondary" type="button">导出调试日志</button><button id="exportBatchDebug" class="secondary" type="button">导出批量调试日志</button></div></details>
+              <details style="margin-top: 12px;"><summary>调试工具 ▸</summary><div class="actions" style="margin-top: 7px;"><button id="exportAutoReportDebug" class="secondary" type="button">导出调试日志</button></div></details>
             </div>
           </div>
         </div>
@@ -3725,6 +3886,8 @@ function installPanel() {
     startBatchReportButton.disabled = autoReportBusy || batchReportBusy;
     const hasBusinessResults = batchReportSession.tasks.some((task) => ["success", "skipped", "failed"].includes(task.status));
     exportBatchResultsButton.hidden = !total || (!hasBusinessResults && !["completed", "paused"].includes(batchReportSession.state));
+    const hasBatchDebugLog = Array.isArray(window.__crawlHubBatchDebugLog?.items) && window.__crawlHubBatchDebugLog.items.length > 0;
+    exportBatchDebugButton.disabled = !hasBatchDebugLog;
     if (batchImportNotice) batchImportState.textContent = batchImportNotice;
     else if (total) batchImportState.textContent = `已导入 ${total} 条任务`;
     else batchImportState.textContent = "";
@@ -3733,7 +3896,7 @@ function installPanel() {
     if (running) {
       const current = batchReportSession.tasks[batchReportSession.current_index];
       if (batchReportSession.phase === "cooldown") {
-        batchReportState.textContent = `第 ${batchReportSession.current_index + 1} / ${total} 条处理完成\n3 秒后继续下一条…\n已完成 ${completed} 条 · 成功 ${success} · 跳过 ${skipped} · 失败 ${failed}`;
+        batchReportState.textContent = `第 ${batchReportSession.current_index + 1} / ${total} 条处理完成\n${batchItemCooldownSeconds()} 秒后继续下一条…\n已完成 ${completed} 条 · 成功 ${success} · 跳过 ${skipped} · 失败 ${failed}`;
         batchReportCurrent.textContent = "";
         return;
       }
@@ -3950,7 +4113,7 @@ function installPanel() {
     renderBinding();
     const waitForBatchItemCooldown = async (index) => {
       batchReportSession.phase = "cooldown";
-      batchReportSession.current_status = `第 ${index + 1} / ${batchReportSession.tasks.length} 条处理完成，3 秒后继续下一条…`;
+      batchReportSession.current_status = `第 ${index + 1} / ${batchReportSession.tasks.length} 条处理完成，${batchItemCooldownSeconds()} 秒后继续下一条…`;
       addAutoReportDebugLog("cooldown_started", { cooldown_ms: BATCH_ITEM_COOLDOWN_MS });
       renderBinding();
       await waitForPageUpdate(BATCH_ITEM_COOLDOWN_MS);
