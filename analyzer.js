@@ -1182,8 +1182,27 @@ function setNativeInputValue(input, value) {
   else input.value = value;
   input.dispatchEvent(new Event("input", { bubbles: true }));
   input.dispatchEvent(new Event("change", { bubbles: true }));
-  input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
-  input.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true }));
+}
+
+function findSearchControlForInput(searchInput) {
+  const inputComponent = searchInput.closest(".core-input-group") || searchInput.parentElement;
+  if (!inputComponent) return null;
+  const suffix = Array.from(inputComponent.querySelectorAll(".core-input-group-suffix"))
+    .find(isVisiblePageElement);
+  if (!suffix) return null;
+  const icon = suffix.querySelector("svg.arco-icon-search") || suffix.querySelector("svg");
+  return icon?.closest("button, [role='button'], [tabindex]") || suffix;
+}
+
+function triggerSearchForInput(searchInput) {
+  const searchControl = findSearchControlForInput(searchInput);
+  if (searchControl && isVisiblePageElement(searchControl)) {
+    searchControl.click();
+    return true;
+  }
+  searchInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
+  searchInput.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true }));
+  return false;
 }
 
 function findAutoReportStepOneRoot(searchInput) {
@@ -1237,13 +1256,15 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null) {
 
   updateStatus("正在搜索商品...");
   setNativeInputValue(searchInput, productId);
+  if (searchInput.value !== productId) throw new Error("商品 ID 未能写入搜索框，请重试。");
+  triggerSearchForInput(searchInput);
   await waitForPageUpdate(350);
   const stepOneRoot = findAutoReportStepOneRoot(searchInput);
   const matchingRows = await waitForDomState(() => {
     const rows = Array.from(stepOneRoot.querySelectorAll("tr")).filter(isVisiblePageElement);
     const matches = rows.filter((row) => rowContainsCompleteProductId(row, productId));
     return matches.length ? matches : null;
-  });
+  }, { timeout: 12000 });
   if (!matchingRows) throw new Error("商品搜索结果中没有此商品 ID。");
   if (matchingRows.length !== 1) throw new Error("商品 ID 匹配到多条结果，请确认后重试。");
 
