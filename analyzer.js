@@ -1145,6 +1145,142 @@ async function openExistingProductBinding(keyword) {
   throw new Error("三点菜单已打开，但未找到“绑定现有商品”。");
 }
 
+function findVisibleExactTextElement(text, root = document) {
+  return Array.from(root.querySelectorAll("*")).find((element) => {
+    if (!isVisiblePageElement(element)) return false;
+    if (compactOpportunityText(element.innerText || element.textContent || "") !== text) return false;
+    return !Array.from(element.children).some((child) => compactOpportunityText(child.innerText || child.textContent || "") === text);
+  }) || null;
+}
+
+function isAvailableDomControl(control) {
+  if (!control || !isVisiblePageElement(control)) return false;
+  return !control.disabled
+    && control.getAttribute("disabled") === null
+    && control.getAttribute("aria-disabled") !== "true";
+}
+
+function findVisibleTextButton(text, root = document) {
+  return Array.from(root.querySelectorAll("button, [role='button'], input[type='button'], input[type='submit']"))
+    .find((control) => isAvailableDomControl(control)
+      && compactOpportunityText(control.innerText || control.value || control.textContent || "") === text) || null;
+}
+
+async function waitForDomState(readState, { timeout = 8000, interval = 250 } = {}) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const state = readState();
+    if (state) return state;
+    await waitForPageUpdate(interval);
+  }
+  return null;
+}
+
+function setNativeInputValue(input, value) {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement?.prototype || {}, "value")?.set;
+  if (setter) setter.call(input, value);
+  else input.value = value;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
+  input.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true }));
+}
+
+function findAutoReportStepOneRoot(searchInput) {
+  const stepTitle = findVisibleExactTextElement("第 1 步：选择商品");
+  for (let element = searchInput; element instanceof Element && element !== document.body; element = element.parentElement) {
+    if (stepTitle && element.contains(stepTitle) && element.querySelector("tr")) return element;
+  }
+  return document.body;
+}
+
+function rowContainsCompleteProductId(row, productId) {
+  const escapedId = productId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const completeId = new RegExp(`(^|[^0-9A-Za-z_-])${escapedId}(?=$|[^0-9A-Za-z_-])`);
+  return completeId.test(compactOpportunityText(row.innerText || row.textContent || ""));
+}
+
+function findRowCheckboxControl(row) {
+  return Array.from(row.querySelectorAll("input[type='checkbox'], [role='checkbox'], label"))
+    .find(isVisiblePageElement) || null;
+}
+
+function hasCheckedState(element) {
+  if (!(element instanceof Element)) return false;
+  if (element instanceof HTMLInputElement && element.type === "checkbox") return element.checked;
+  if (element.getAttribute("aria-checked") === "true" || element.getAttribute("aria-selected") === "true") return true;
+  return typeof element.className === "string" && /(?:^|\s)[\w-]*checked(?:\s|$)/i.test(element.className);
+}
+
+function isProductRowChecked(row) {
+  if (hasCheckedState(row)) return true;
+  return Array.from(row.querySelectorAll("input[type='checkbox'], [role='checkbox'], label"))
+    .some(hasCheckedState);
+}
+
+async function runSingleProductAutoReport(keyword, productId, onStatus = null) {
+  const session = window.__crawlHubBindingSession;
+  if (!session || session.state !== "completed") throw new Error("请先完成商品机会扫描。");
+  const updateStatus = (message) => {
+    if (onStatus) onStatus(message);
+  };
+
+  updateStatus("正在打开绑定入口...");
+  await openExistingProductBinding(keyword);
+  updateStatus("正在等待商品选择窗口...");
+  const searchInput = await waitForDomState(() => {
+    const input = document.getElementById("search_content_input");
+    return input && isVisiblePageElement(input) && findVisibleExactTextElement("第 1 步：选择商品") ? input : null;
+  });
+  if (!searchInput) throw new Error("未等到商品选择窗口，请稍后重试。");
+  await waitForPageUpdate(350);
+
+  updateStatus("正在搜索商品...");
+  setNativeInputValue(searchInput, productId);
+  await waitForPageUpdate(350);
+  const stepOneRoot = findAutoReportStepOneRoot(searchInput);
+  const matchingRows = await waitForDomState(() => {
+    const rows = Array.from(stepOneRoot.querySelectorAll("tr")).filter(isVisiblePageElement);
+    const matches = rows.filter((row) => rowContainsCompleteProductId(row, productId));
+    return matches.length ? matches : null;
+  });
+  if (!matchingRows) throw new Error("商品搜索结果中没有此商品 ID。");
+  if (matchingRows.length !== 1) throw new Error("商品 ID 匹配到多条结果，请确认后重试。");
+
+  const targetRow = matchingRows[0];
+  const checkbox = findRowCheckboxControl(targetRow);
+  if (!checkbox) throw new Error("该商品暂时无法勾选。");
+  updateStatus("正在选择商品...");
+  if (!isProductRowChecked(targetRow)) checkbox.click();
+  const checked = await waitForDomState(() => isProductRowChecked(targetRow));
+  if (!checked) throw new Error("未能确认商品已选中。");
+  await waitForPageUpdate(350);
+
+  const nextButton = await waitForDomState(() => findVisibleTextButton("下一步"));
+  if (!nextButton) throw new Error("未找到可用的下一步按钮。");
+  updateStatus("正在进入添加关键词步骤...");
+  nextButton.click();
+  const stepTwoReady = await waitForDomState(() => {
+    const hasStepTwoTitle = Boolean(findVisibleExactTextElement("第 2 步：添加关键词"));
+    const submitButton = findVisibleTextButton("提交");
+    const firstStepInput = document.getElementById("search_content_input");
+    return hasStepTwoTitle || (submitButton && (!firstStepInput || !isVisiblePageElement(firstStepInput)));
+  });
+  if (!stepTwoReady) throw new Error("未能进入添加关键词步骤。");
+  await waitForPageUpdate(350);
+
+  const submitButton = await waitForDomState(() => findVisibleTextButton("提交"));
+  if (!submitButton) throw new Error("未找到可用的提交按钮。");
+  updateStatus("正在提交...");
+  submitButton.click();
+  const submitted = await waitForDomState(() => Array.from(document.body?.querySelectorAll("*") || [])
+    .some((element) => isVisiblePageElement(element)
+      && compactOpportunityText(element.innerText || element.textContent || "").includes("商品提交成功")), { timeout: 10000 });
+  if (!submitted) throw new Error("提交后未看到成功提示。");
+  updateStatus("提报成功。");
+  return { keyword, product_id: productId };
+}
+
 function collectProductOpportunityData() {
   const detected = detectProductOpportunityTable();
   if (!detected) throw new Error("当前页面未识别到商品机会字段。");
@@ -2660,6 +2796,13 @@ function installPanel() {
               <div class="actions" style="margin-top: 9px;"><button id="locateBinding" type="button">定位并打开</button></div>
               <div id="bindingLocateState" class="binding-status"></div>
             </div>
+            <div id="autoReportTest" class="binding-search" hidden>
+              <strong>自动提报（测试）</strong>
+              <input id="autoReportKeyword" class="binding-input" type="text" autocomplete="off" placeholder="请输入完整关键词" style="margin-top: 9px;" />
+              <input id="autoReportProductId" class="binding-input" type="text" inputmode="numeric" autocomplete="off" placeholder="请输入商品 ID" style="margin-top: 7px;" />
+              <div class="actions" style="margin-top: 9px;"><button id="startAutoReport" type="button">开始自动提报</button></div>
+              <div id="autoReportState" class="binding-status"></div>
+            </div>
           </div>
         </div>
         <div id="message" class="message"></div>
@@ -2685,6 +2828,11 @@ function installPanel() {
   const bindingSearch = shadow.querySelector("#bindingSearch");
   const bindingLocateButton = shadow.querySelector("#locateBinding");
   const bindingLocateState = shadow.querySelector("#bindingLocateState");
+  const autoReportTest = shadow.querySelector("#autoReportTest");
+  const autoReportKeywordInput = shadow.querySelector("#autoReportKeyword");
+  const autoReportProductIdInput = shadow.querySelector("#autoReportProductId");
+  const startAutoReportButton = shadow.querySelector("#startAutoReport");
+  const autoReportState = shadow.querySelector("#autoReportState");
   const collectionTitle = shadow.querySelector("#collectionTitle");
   const collectionHint = shadow.querySelector("#collectionHint");
   const rankSummary = shadow.querySelector("#rankSummary");
@@ -2722,6 +2870,7 @@ function installPanel() {
   let opportunityCollectionCount = 0;
   let bindingScanBusy = false;
   let bindingLocateBusy = false;
+  let autoReportBusy = false;
   let previousCollectionPageType = null;
   const header = shadow.querySelector("header");
   const dragState = { active: false, offsetX: 0, offsetY: 0, htmlUserSelect: "", bodyUserSelect: "" };
@@ -2921,11 +3070,13 @@ function installPanel() {
     const scanControl = window.__crawlHubBindingScanControl;
     bindingScanButton.disabled = bindingScanBusy;
     bindingLocateButton.disabled = bindingLocateBusy;
+    startAutoReportButton.disabled = autoReportBusy;
     if (!session) {
       bindingScanState.textContent = "尚未扫描";
       bindingLoaded.hidden = true;
       pauseScanTaskButton.hidden = true;
       bindingSearch.hidden = true;
+      autoReportTest.hidden = true;
       return;
     }
     if (session.state === "scanning") {
@@ -2936,6 +3087,7 @@ function installPanel() {
       pauseScanTaskButton.textContent = session.phase === "paused" ? "继续扫描" : "暂停扫描";
       pauseScanTaskButton.disabled = false;
       bindingSearch.hidden = true;
+      autoReportTest.hidden = true;
       return;
     }
     if (session.state === "error") {
@@ -2943,6 +3095,7 @@ function installPanel() {
       bindingLoaded.hidden = true;
       pauseScanTaskButton.hidden = true;
       bindingSearch.hidden = true;
+      autoReportTest.hidden = true;
       return;
     }
     bindingScanState.textContent = "扫描完成";
@@ -2950,6 +3103,7 @@ function installPanel() {
     bindingLoaded.textContent = `已发现：${session.loaded_count} 个商品机会`;
     pauseScanTaskButton.hidden = true;
     bindingSearch.hidden = false;
+    autoReportTest.hidden = false;
   };
   const reconnectPage = async () => {
     setMessage("正在检查页面连接…");
@@ -3085,6 +3239,32 @@ function installPanel() {
       bindingLocateState.textContent = error.message || "未找到该商品机会关键词。";
     } finally {
       bindingLocateBusy = false;
+      renderBinding();
+    }
+  });
+  startAutoReportButton.addEventListener("click", async () => {
+    const keyword = compactOpportunityText(autoReportKeywordInput.value);
+    const productId = compactOpportunityText(autoReportProductIdInput.value);
+    if (!keyword) {
+      autoReportState.textContent = "请输入关键词。";
+      return;
+    }
+    if (!productId) {
+      autoReportState.textContent = "请输入商品 ID。";
+      return;
+    }
+    if (autoReportBusy) return;
+    autoReportBusy = true;
+    autoReportState.textContent = "正在准备提报...";
+    renderBinding();
+    try {
+      await runSingleProductAutoReport(keyword, productId, (status) => {
+        autoReportState.textContent = status;
+      });
+    } catch (error) {
+      autoReportState.textContent = error.message || "自动提报未完成。";
+    } finally {
+      autoReportBusy = false;
       renderBinding();
     }
   });
