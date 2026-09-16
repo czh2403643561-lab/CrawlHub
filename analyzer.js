@@ -1266,28 +1266,135 @@ function setNativeInputValue(input, value) {
   input.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
+function resetAutoReportDebugLog() {
+  window.__crawlHubAutoReportDebugLog = [];
+}
+
+function addAutoReportDebugLog(step, details = {}) {
+  if (!Array.isArray(window.__crawlHubAutoReportDebugLog)) resetAutoReportDebugLog();
+  window.__crawlHubAutoReportDebugLog.push({
+    at: new Date().toISOString(),
+    step,
+    ...details
+  });
+}
+
+function describeAutoReportElement(element) {
+  if (!(element instanceof Element)) return null;
+  const rect = element.getBoundingClientRect();
+  return {
+    tag: element.tagName.toLowerCase(),
+    id: element.id || null,
+    class: compactOpportunityText(element.getAttribute("class") || "") || null,
+    rect: {
+      left: Math.round(rect.left),
+      top: Math.round(rect.top),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height)
+    }
+  };
+}
+
+function getAutoReportProductResultsSnapshot(drawerRoot) {
+  const rows = Array.from(drawerRoot?.querySelectorAll("tbody tr") || [])
+    .filter(isVisiblePageElement)
+    .map((row) => compactOpportunityText(row.innerText || row.textContent || ""))
+    .filter(Boolean);
+  return {
+    visible_row_count: rows.length,
+    row_preview: rows.slice(0, 3).map((text) => text.slice(0, 180)),
+    signature: rows.slice(0, 12).join(" | ")
+  };
+}
+
+function didAutoReportProductResultsChange(before, after) {
+  return Boolean(before && after && (before.visible_row_count !== after.visible_row_count || before.signature !== after.signature));
+}
+
 function findSearchControlForInput(searchInput) {
   const inputComponent = searchInput.closest(".core-input-group") || searchInput.parentElement;
   if (!inputComponent) return null;
-  const suffix = Array.from(inputComponent.querySelectorAll(".core-input-group-suffix"))
-    .find(isVisiblePageElement);
-  if (!suffix) return null;
-  const icon = suffix.querySelector("svg.arco-icon-search") || suffix.querySelector("svg");
-  return icon?.closest("button, [role='button'], [tabindex]") || suffix;
+  return Array.from(inputComponent.querySelectorAll("svg.arco-icon-search"))
+    .find(isVisiblePageElement) || null;
 }
 
-function clickSearchControlForInput(searchInput) {
-  const searchControl = findSearchControlForInput(searchInput);
-  if (!searchControl || !isVisiblePageElement(searchControl)) return false;
-  searchControl.click();
-  return true;
+function dispatchAutoReportPointerSequence(target, point) {
+  const mouseEvent = (type, buttons) => new MouseEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    view: window,
+    clientX: point.clientX,
+    clientY: point.clientY,
+    screenX: point.screenX,
+    screenY: point.screenY,
+    button: 0,
+    buttons
+  });
+  const pointerEvent = (type, buttons) => {
+    const EventType = window.PointerEvent || MouseEvent;
+    return new EventType(type, {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX: point.clientX,
+      clientY: point.clientY,
+      screenX: point.screenX,
+      screenY: point.screenY,
+      button: 0,
+      buttons,
+      pointerType: "mouse",
+      isPrimary: true
+    });
+  };
+  target.dispatchEvent(pointerEvent("pointerdown", 1));
+  target.dispatchEvent(mouseEvent("mousedown", 1));
+  target.dispatchEvent(pointerEvent("pointerup", 0));
+  target.dispatchEvent(mouseEvent("mouseup", 0));
+  target.dispatchEvent(mouseEvent("click", 0));
 }
 
-function triggerSearchForInput(searchInput) {
-  if (clickSearchControlForInput(searchInput)) return true;
-  searchInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
-  searchInput.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", bubbles: true }));
-  return false;
+function clickSearchControlForInput(searchInput, { attempt = 1, beforeResults = null } = {}) {
+  const searchIcon = findSearchControlForInput(searchInput);
+  if (!searchIcon || !isVisiblePageElement(searchIcon)) return { dispatched: false, search_icon: null, click_target: null };
+  const rect = searchIcon.getBoundingClientRect();
+  const point = {
+    clientX: rect.left + rect.width / 2,
+    clientY: rect.top + rect.height / 2,
+    screenX: window.screenX + rect.left + rect.width / 2,
+    screenY: window.screenY + rect.top + rect.height / 2
+  };
+  const clickTarget = document.elementFromPoint(point.clientX, point.clientY);
+  addAutoReportDebugLog("search_click_target", {
+    attempt,
+    input_value: searchInput.value,
+    search_icon: describeAutoReportElement(searchIcon),
+    element_from_point: describeAutoReportElement(clickTarget),
+    before_results: beforeResults
+  });
+  if (clickTarget) {
+    dispatchAutoReportPointerSequence(clickTarget, point);
+  } else {
+    searchIcon.dispatchEvent(new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX: point.clientX,
+      clientY: point.clientY,
+      screenX: point.screenX,
+      screenY: point.screenY,
+      button: 0
+    }));
+  }
+  addAutoReportDebugLog("search_click_dispatched", {
+    attempt,
+    actual_target: describeAutoReportElement(clickTarget || searchIcon),
+    fallback_to_svg: !clickTarget
+  });
+  return { dispatched: true, search_icon: searchIcon, click_target: clickTarget || searchIcon };
+}
+
+function triggerSearchForInput(searchInput, options) {
+  return clickSearchControlForInput(searchInput, options);
 }
 
 function findAutoReportStepOneDrawerRoot() {
@@ -1365,29 +1472,63 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null) {
 
   updateStatus("正在打开绑定入口...");
   await openExistingProductBinding(keyword);
+  addAutoReportDebugLog("binding_opened");
   updateStatus("正在等待商品列表加载...");
   const readyDrawer = await waitForDomState(findReadyAutoReportStepOneDrawer, { timeout: 15000 });
   if (!readyDrawer) throw new Error("商品选择页面尚未加载完成，请稍后重试。");
+  addAutoReportDebugLog("step_one_ready", { drawer: describeAutoReportElement(readyDrawer.drawer_root) });
   const searchInput = findReadyAutoReportSearchInput(readyDrawer);
   if (!searchInput) throw new Error("商品选择页面尚未加载完成，请稍后重试。");
+  addAutoReportDebugLog("input_found", { input: describeAutoReportElement(searchInput), input_value: searchInput.value });
 
   updateStatus("正在输入商品 ID...");
   setNativeInputValue(searchInput, productId);
   if (searchInput.value !== productId) throw new Error("商品 ID 未能写入搜索框，请重试。");
-  const searchControl = findSearchControlForInput(searchInput);
-  if (!searchControl || !isAvailableDomControl(searchControl)) throw new Error("商品选择页面尚未加载完成，请稍后重试。");
-  updateStatus("正在搜索商品...");
-  if (!triggerSearchForInput(searchInput)) throw new Error("商品选择页面尚未加载完成，请稍后重试。");
+  addAutoReportDebugLog("product_id_written", { input_value: searchInput.value });
+  let searchAttempt = 0;
+  let searchBaseline = null;
+  let searchResultChanged = false;
+  const loggedChangeSignatures = new Set();
+  const triggerProductSearch = (currentInput) => {
+    const stepOneRoot = findAutoReportStepOneRoot(currentInput);
+    if (!stepOneRoot) throw new Error("商品选择页面尚未加载完成，请稍后重试。");
+    const searchIcon = findSearchControlForInput(currentInput);
+    addAutoReportDebugLog("search_icon_found", {
+      attempt: searchAttempt + 1,
+      input_value: currentInput.value,
+      found: Boolean(searchIcon),
+      search_icon: describeAutoReportElement(searchIcon)
+    });
+    if (!searchIcon || !isVisiblePageElement(searchIcon)) throw new Error("商品选择页面尚未加载完成，请稍后重试。");
+    searchAttempt += 1;
+    searchBaseline = getAutoReportProductResultsSnapshot(stepOneRoot);
+    const clickResult = triggerSearchForInput(currentInput, { attempt: searchAttempt, beforeResults: searchBaseline });
+    if (!clickResult.dispatched) throw new Error("未能点击商品搜索图标，请重试。");
+  };
   const readMatchingRows = () => {
     const currentInput = document.getElementById("search_content_input");
     if (!currentInput || !isVisiblePageElement(currentInput)) return null;
     const stepOneRoot = findAutoReportStepOneRoot(currentInput);
     if (!stepOneRoot) return null;
+    const snapshot = getAutoReportProductResultsSnapshot(stepOneRoot);
+    if (didAutoReportProductResultsChange(searchBaseline, snapshot)) {
+      searchResultChanged = true;
+      const signature = `${searchAttempt}:${snapshot.visible_row_count}:${snapshot.signature}`;
+      if (!loggedChangeSignatures.has(signature)) {
+        loggedChangeSignatures.add(signature);
+        addAutoReportDebugLog("search_result_changed", { attempt: searchAttempt, after_results: snapshot });
+      }
+    }
     const rows = Array.from(stepOneRoot.querySelectorAll("tr")).filter(isVisiblePageElement);
     const matches = rows.filter((row) => rowContainsCompleteProductId(row, productId));
-    if (matches.length) return { matches };
+    if (matches.length) {
+      addAutoReportDebugLog("product_found", { attempt: searchAttempt, product_id: productId, match_count: matches.length });
+      return { matches };
+    }
     return hasExplicitEmptyProductResults(stepOneRoot) ? { empty: true } : null;
   };
+  updateStatus("正在搜索商品...");
+  triggerProductSearch(searchInput);
   let searchResult = await waitForDomState(readMatchingRows, { timeout: 15000 });
   if (searchResult?.empty) throw new Error("商品搜索结果中没有此商品 ID。");
   let matchingRows = searchResult?.matches || null;
@@ -1395,20 +1536,27 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null) {
     const currentInput = document.getElementById("search_content_input");
     const stillOnStepOne = isAutoReportStillOnStepOne();
     if (stillOnStepOne && currentInput && isVisiblePageElement(currentInput)) {
-      if (currentInput.value === productId) clickSearchControlForInput(currentInput);
-      searchResult = await waitForDomState(readMatchingRows, { timeout: 15000 });
-      if (searchResult?.empty) throw new Error("商品搜索结果中没有此商品 ID。");
-      matchingRows = searchResult?.matches || null;
+      if (currentInput.value === productId) {
+        triggerProductSearch(currentInput);
+        searchResult = await waitForDomState(readMatchingRows, { timeout: 15000 });
+        if (searchResult?.empty) throw new Error("商品搜索结果中没有此商品 ID。");
+        matchingRows = searchResult?.matches || null;
+      }
     }
   }
-  if (!matchingRows) throw new Error("商品搜索结果中没有此商品 ID。");
+  if (!matchingRows) {
+    if (!searchResultChanged) throw new Error("商品搜索未生效，请手动点击右侧放大镜后重试。");
+    throw new Error("商品搜索结果中没有此商品 ID。");
+  }
   if (matchingRows.length !== 1) throw new Error("商品 ID 匹配到多条结果，请确认后重试。");
 
   const targetRow = matchingRows[0];
   const checkbox = findRowCheckboxControl(targetRow);
   if (!checkbox) throw new Error("该商品暂时无法勾选。");
   updateStatus("正在选择商品...");
-  if (!isProductRowChecked(targetRow)) checkbox.click();
+  const wasChecked = isProductRowChecked(targetRow);
+  if (!wasChecked) checkbox.click();
+  addAutoReportDebugLog("checkbox_clicked", { checkbox: describeAutoReportElement(checkbox), was_checked: wasChecked, click_dispatched: !wasChecked });
   const checked = await waitForDomState(() => isProductRowChecked(targetRow));
   if (!checked) throw new Error("未能确认商品已选中。");
   await waitForPageUpdate(350);
@@ -1417,6 +1565,7 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null) {
   if (!nextButton) throw new Error("未找到可用的下一步按钮。");
   updateStatus("正在进入添加关键词步骤...");
   nextButton.click();
+  addAutoReportDebugLog("next_clicked", { button: describeAutoReportElement(nextButton) });
   const stepTwoReady = await waitForDomState(() => {
     const hasStepTwoTitle = Boolean(findVisibleExactTextElement("第 2 步：添加关键词"));
     const submitButton = findVisibleTextButton("提交");
@@ -1430,10 +1579,12 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null) {
   if (!submitButton) throw new Error("未找到可用的提交按钮。");
   updateStatus("正在提交...");
   submitButton.click();
+  addAutoReportDebugLog("submit_clicked", { button: describeAutoReportElement(submitButton) });
   const submitted = await waitForDomState(() => Array.from(document.body?.querySelectorAll("*") || [])
     .some((element) => isVisiblePageElement(element)
       && compactOpportunityText(element.innerText || element.textContent || "").includes("商品提交成功")), { timeout: 10000 });
   if (!submitted) throw new Error("提交后未看到成功提示。");
+  addAutoReportDebugLog("success");
   updateStatus("提报成功。");
   return { keyword, product_id: productId };
 }
@@ -2964,6 +3115,7 @@ function installPanel() {
               <input id="autoReportKeyword" class="binding-input" type="text" autocomplete="off" placeholder="请输入完整关键词" style="margin-top: 9px;" />
               <input id="autoReportProductId" class="binding-input" type="text" inputmode="numeric" autocomplete="off" placeholder="请输入商品 ID" style="margin-top: 7px;" />
               <div class="actions" style="margin-top: 9px;"><button id="startAutoReport" type="button">开始自动提报</button></div>
+              <div class="actions" style="margin-top: 7px;"><button id="exportAutoReportDebug" class="secondary" type="button">导出调试日志</button></div>
               <div id="autoReportState" class="binding-status"></div>
             </div>
           </div>
@@ -2997,6 +3149,7 @@ function installPanel() {
   const autoReportKeywordInput = shadow.querySelector("#autoReportKeyword");
   const autoReportProductIdInput = shadow.querySelector("#autoReportProductId");
   const startAutoReportButton = shadow.querySelector("#startAutoReport");
+  const exportAutoReportDebugButton = shadow.querySelector("#exportAutoReportDebug");
   const autoReportState = shadow.querySelector("#autoReportState");
   const collectionTitle = shadow.querySelector("#collectionTitle");
   const collectionHint = shadow.querySelector("#collectionHint");
@@ -3385,6 +3538,17 @@ function installPanel() {
     setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
     setMessage("分析完成，analysis.json 已下载", "success");
   };
+  const downloadAutoReportDebugLog = () => {
+    const log = Array.isArray(window.__crawlHubAutoReportDebugLog) ? window.__crawlHubAutoReportDebugLog : [];
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const blobUrl = URL.createObjectURL(new Blob([JSON.stringify(log, null, 2)], { type: "application/json" }));
+    const anchor = document.createElement("a");
+    anchor.href = blobUrl;
+    anchor.download = `crawlHub-debug-${timestamp}.json`;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    autoReportState.textContent = log.length ? "调试日志已下载。" : "暂无调试日志，已下载空日志。";
+  };
 
   window.__crawlHubSamplingChanged = render;
   analysisModeButton.addEventListener("click", () => setMode("analysis"));
@@ -3513,6 +3677,8 @@ function installPanel() {
       return;
     }
     if (autoReportBusy) return;
+    resetAutoReportDebugLog();
+    addAutoReportDebugLog("start", { keyword, product_id: productId });
     autoReportBusy = true;
     autoReportState.textContent = "正在准备提报...";
     renderBinding();
@@ -3521,12 +3687,14 @@ function installPanel() {
         autoReportState.textContent = status;
       });
     } catch (error) {
+      addAutoReportDebugLog("error", { message: error?.message || "自动提报未完成。" });
       autoReportState.textContent = error.message || "自动提报未完成。";
     } finally {
       autoReportBusy = false;
       renderBinding();
     }
   });
+  exportAutoReportDebugButton.addEventListener("click", downloadAutoReportDebugLog);
   exportSettingsButton.addEventListener("click", async () => {
     try {
       if (typeof window.showDirectoryPicker !== "function") throw new Error("当前浏览器不支持目录选择，请使用最新版 Chrome。");
