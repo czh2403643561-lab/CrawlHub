@@ -17,6 +17,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   (async () => {
     if (message.type === "crawlHub:ping") return { connected: true };
+    if (message.type === "crawlHub:download-batch-template") {
+      const download_id = await chrome.downloads.download({
+        url: chrome.runtime.getURL("templates/CrawlHub_批量提报模板.csv"),
+        filename: "CrawlHub_批量提报模板.csv",
+        saveAs: true
+      });
+      return { download_id };
+    }
     const cacheKey = String(message.cache_key || "");
     if (message.type === "crawlHub:read-binding-debug-mode") {
       const modes = await readStorageMap(BINDING_DEBUG_MODES_STORAGE_KEY);

@@ -1272,9 +1272,11 @@ function resetAutoReportDebugLog() {
 
 function addAutoReportDebugLog(step, details = {}) {
   if (!Array.isArray(window.__crawlHubAutoReportDebugLog)) resetAutoReportDebugLog();
+  const batchContext = window.__crawlHubAutoReportDebugContext;
   window.__crawlHubAutoReportDebugLog.push({
     at: new Date().toISOString(),
     step,
+    ...(batchContext && typeof batchContext === "object" ? batchContext : {}),
     ...details
   });
 }
@@ -1463,6 +1465,146 @@ function isProductRowChecked(row) {
     .some(hasCheckedState);
 }
 
+function findVisibleAutoReportSuccessMessages() {
+  return Array.from(document.querySelectorAll(".core-message.core-message-success[role='alert']"))
+    .filter((element) => isVisiblePageElement(element)
+      && compactOpportunityText(element.innerText || element.textContent || "").includes("商品提交成功"));
+}
+
+function hasVisibleProductOpportunityOperationHeader() {
+  const detected = detectProductOpportunityTable();
+  return Boolean(detected?.headers?.some((header) => compactOpportunityText(header) === "操作"));
+}
+
+function createBatchSystemError(message) {
+  const error = new Error(message);
+  error.batch_system = true;
+  return error;
+}
+
+function isBatchSystemError(error) {
+  return Boolean(error?.batch_system)
+    || /当前已不在 TikTok 商品机会-热门关键词页面|商品选择页面尚未加载完成|未能回到商品机会主列表/.test(String(error?.message || ""));
+}
+
+function assertBatchOpportunityMainPage() {
+  if (!isTrendingKeywordsOpportunityPage() || !hasVisibleProductOpportunityOperationHeader()) {
+    throw createBatchSystemError("当前已不在 TikTok 商品机会-热门关键词页面，批量已暂停。");
+  }
+}
+
+function findVisibleAutoReportDrawerRoot() {
+  const stepOne = findAutoReportStepOneDrawerRoot();
+  if (stepOne) return stepOne;
+  const stepTwoTitle = findVisibleExactTextElement("第 2 步：添加关键词");
+  const drawerRoot = stepTwoTitle?.closest(".core-drawer-wrapper, [role='dialog'], [aria-modal='true']");
+  return drawerRoot && isVisiblePageElement(drawerRoot) ? drawerRoot : null;
+}
+
+function findAutoReportDrawerCloseControl(drawerRoot) {
+  return Array.from(drawerRoot?.querySelectorAll("button, [role='button'], [tabindex]") || [])
+    .find((control) => {
+      if (!isAvailableDomControl(control)) return false;
+      const label = compactOpportunityText(control.getAttribute("aria-label") || control.getAttribute("title") || control.innerText || control.textContent || "");
+      return /^(?:关闭|close|×|x)$/i.test(label);
+    }) || null;
+}
+
+async function waitForBatchOpportunityRecovery(successMessage = null) {
+  const recovered = await waitForDomState(() => {
+    const messageVisible = successMessage instanceof Element
+      && document.documentElement.contains(successMessage)
+      && isVisiblePageElement(successMessage);
+    if (messageVisible || findVisibleAutoReportDrawerRoot()) return null;
+    return hasVisibleProductOpportunityOperationHeader() ? true : null;
+  }, { timeout: 15000 });
+  if (!recovered) throw createBatchSystemError("未能回到商品机会主列表，批量已暂停。");
+}
+
+async function recoverBatchOpportunityAfterFailure() {
+  const drawerRoot = findVisibleAutoReportDrawerRoot();
+  if (drawerRoot) {
+    const closeControl = findAutoReportDrawerCloseControl(drawerRoot);
+    if (!closeControl) throw createBatchSystemError("未能关闭当前提报窗口，批量已暂停。");
+    closeControl.click();
+  }
+  await waitForBatchOpportunityRecovery();
+}
+
+function parseBatchReportCsv(text) {
+  const source = String(text || "").replace(/^\uFEFF/, "");
+  const rows = [];
+  let row = [];
+  let field = "";
+  let quoted = false;
+  let quoteClosed = false;
+  const finishField = () => {
+    row.push(field);
+    field = "";
+    quoteClosed = false;
+  };
+  const finishRow = () => {
+    finishField();
+    rows.push(row);
+    row = [];
+  };
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (quoted) {
+      if (character === '"') {
+        if (source[index + 1] === '"') {
+          field += '"';
+          index += 1;
+        } else {
+          quoted = false;
+          quoteClosed = true;
+        }
+      } else {
+        field += character;
+      }
+      continue;
+    }
+    if (quoteClosed && character !== "," && character !== "\r" && character !== "\n") throw new Error("CSV 引号格式错误。");
+    if (character === '"') {
+      if (field) throw new Error("CSV 引号格式错误。");
+      quoted = true;
+    } else if (character === ",") {
+      finishField();
+    } else if (character === "\n") {
+      finishRow();
+    } else if (character !== "\r") {
+      field += character;
+    }
+  }
+  if (quoted) throw new Error("CSV 引号未闭合。");
+  if (field || row.length) finishRow();
+  const nonBlankRows = rows.filter((cells) => cells.some((cell) => String(cell || "").trim()));
+  if (!nonBlankRows.length) throw new Error("CSV 文件为空。");
+  const headers = nonBlankRows[0].map((header) => String(header || "").trim().toLowerCase());
+  const keywordIndex = headers.indexOf("keyword");
+  const productIdIndex = headers.indexOf("product_id");
+  if (keywordIndex < 0 || productIdIndex < 0) throw new Error("CSV 必须包含 keyword 和 product_id 字段。");
+  const tasks = [];
+  nonBlankRows.slice(1).forEach((cells, index) => {
+    const lineNumber = index + 2;
+    const keyword = String(cells[keywordIndex] || "").trim();
+    const productId = String(cells[productIdIndex] || "").trim().replace(/^'/, "").trim();
+    if (!keyword) throw new Error(`第 ${lineNumber} 行 keyword 为空。`);
+    if (!/^\d+$/.test(productId)) throw new Error(`第 ${lineNumber} 行 product_id 必须为纯数字。`);
+    tasks.push({ keyword, product_id: productId, status: "pending", error: "" });
+  });
+  if (!tasks.length) throw new Error("CSV 中没有可执行任务。");
+  return tasks;
+}
+
+function batchReportResultsCsv(tasks) {
+  const escapeCell = (value) => {
+    const text = String(value ?? "");
+    return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  };
+  return ["keyword,product_id,status,error", ...tasks.map((task) => [task.keyword, task.product_id, task.status, task.error].map(escapeCell).join(","))].join("\r\n");
+}
+
 async function runSingleProductAutoReport(keyword, productId, onStatus = null) {
   const session = window.__crawlHubBindingSession;
   if (!session || session.state !== "completed") throw new Error("请先完成商品机会扫描。");
@@ -1578,15 +1720,15 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null) {
   const submitButton = await waitForDomState(() => findVisibleTextButton("提交"));
   if (!submitButton) throw new Error("未找到可用的提交按钮。");
   updateStatus("正在提交...");
+  const previousSuccessMessages = new Set(findVisibleAutoReportSuccessMessages());
   submitButton.click();
   addAutoReportDebugLog("submit_clicked", { button: describeAutoReportElement(submitButton) });
-  const submitted = await waitForDomState(() => Array.from(document.body?.querySelectorAll("*") || [])
-    .some((element) => isVisiblePageElement(element)
-      && compactOpportunityText(element.innerText || element.textContent || "").includes("商品提交成功")), { timeout: 10000 });
+  const submitted = await waitForDomState(() => findVisibleAutoReportSuccessMessages()
+    .find((element) => !previousSuccessMessages.has(element)), { timeout: 10000 });
   if (!submitted) throw new Error("提交后未看到成功提示。");
-  addAutoReportDebugLog("success");
+  addAutoReportDebugLog("success", { message: describeAutoReportElement(submitted) });
   updateStatus("提报成功。");
-  return { keyword, product_id: productId };
+  return { keyword, product_id: productId, success_message: submitted };
 }
 
 function collectProductOpportunityData() {
@@ -3115,8 +3257,17 @@ function installPanel() {
               <input id="autoReportKeyword" class="binding-input" type="text" autocomplete="off" placeholder="请输入完整关键词" style="margin-top: 9px;" />
               <input id="autoReportProductId" class="binding-input" type="text" inputmode="numeric" autocomplete="off" placeholder="请输入商品 ID" style="margin-top: 7px;" />
               <div class="actions" style="margin-top: 9px;"><button id="startAutoReport" type="button">开始自动提报</button></div>
-              <div class="actions" style="margin-top: 7px;"><button id="exportAutoReportDebug" class="secondary" type="button">导出调试日志</button></div>
               <div id="autoReportState" class="binding-status"></div>
+              <div class="binding-search" style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #e7ebf3;">
+                <strong>批量提报</strong>
+                <div class="actions" style="margin-top: 9px;"><button id="downloadBatchTemplate" class="secondary" type="button">下载导入模板</button><button id="importBatchTasks" class="secondary" type="button">导入任务文件</button></div>
+                <input id="batchTaskFile" type="file" accept=".csv,text/csv" hidden />
+                <div id="batchImportState" class="binding-status"></div>
+                <div class="actions" style="margin-top: 7px;"><button id="startBatchReport" type="button" hidden>开始批量提报</button><button id="exportBatchResults" class="secondary" type="button" hidden>导出处理结果</button></div>
+                <div id="batchReportState" class="binding-status" style="white-space: pre-line;" hidden></div>
+                <div id="batchReportCurrent" class="binding-status" style="white-space: pre-line;" hidden></div>
+              </div>
+              <details style="margin-top: 12px;"><summary>调试工具 ▸</summary><div class="actions" style="margin-top: 7px;"><button id="exportAutoReportDebug" class="secondary" type="button">导出调试日志</button></div></details>
             </div>
           </div>
         </div>
@@ -3151,6 +3302,14 @@ function installPanel() {
   const startAutoReportButton = shadow.querySelector("#startAutoReport");
   const exportAutoReportDebugButton = shadow.querySelector("#exportAutoReportDebug");
   const autoReportState = shadow.querySelector("#autoReportState");
+  const downloadBatchTemplateButton = shadow.querySelector("#downloadBatchTemplate");
+  const importBatchTasksButton = shadow.querySelector("#importBatchTasks");
+  const batchTaskFileInput = shadow.querySelector("#batchTaskFile");
+  const batchImportState = shadow.querySelector("#batchImportState");
+  const startBatchReportButton = shadow.querySelector("#startBatchReport");
+  const exportBatchResultsButton = shadow.querySelector("#exportBatchResults");
+  const batchReportState = shadow.querySelector("#batchReportState");
+  const batchReportCurrent = shadow.querySelector("#batchReportCurrent");
   const collectionTitle = shadow.querySelector("#collectionTitle");
   const collectionHint = shadow.querySelector("#collectionHint");
   const rankSummary = shadow.querySelector("#rankSummary");
@@ -3189,6 +3348,9 @@ function installPanel() {
   let bindingScanBusy = false;
   let bindingLocateBusy = false;
   let autoReportBusy = false;
+  let batchReportBusy = false;
+  let batchReportSession = { state: "idle", tasks: [], current_index: -1, current_status: "", error: "" };
+  let batchImportNotice = "";
   let bindingDebugModeEnabled = false;
   let bindingDebugBusy = false;
   let bindingDebugIdentity = null;
@@ -3388,16 +3550,51 @@ function installPanel() {
     saveCollectionTemplateButton.disabled = !result.field_template.length;
     clearCollectionDataButton.disabled = false;
   };
+  const batchReportCounts = () => {
+    const tasks = batchReportSession.tasks || [];
+    const success = tasks.filter((task) => task.status === "success").length;
+    const failed = tasks.filter((task) => task.status === "failed").length;
+    return { total: tasks.length, success, failed, completed: success + failed };
+  };
+  const renderBatchReport = () => {
+    const { total, success, failed, completed } = batchReportCounts();
+    const running = batchReportSession.state === "running";
+    downloadBatchTemplateButton.disabled = running;
+    importBatchTasksButton.disabled = running;
+    startBatchReportButton.hidden = !total || running;
+    startBatchReportButton.disabled = autoReportBusy || batchReportBusy;
+    exportBatchResultsButton.hidden = !total || !["completed", "paused"].includes(batchReportSession.state);
+    if (batchImportNotice) batchImportState.textContent = batchImportNotice;
+    else if (total) batchImportState.textContent = `已导入 ${total} 条任务`;
+    else batchImportState.textContent = "";
+    batchReportState.hidden = !["running", "completed", "paused"].includes(batchReportSession.state);
+    batchReportCurrent.hidden = !running;
+    if (running) {
+      const current = batchReportSession.tasks[batchReportSession.current_index];
+      batchReportState.textContent = `正在处理第 ${batchReportSession.current_index + 1} / ${total} 条\n已完成 ${completed} 条 · 成功 ${success} · 失败 ${failed}`;
+      batchReportCurrent.textContent = current
+        ? `当前：\n${current.keyword}\n${current.product_id}${batchReportSession.current_status ? `\n${batchReportSession.current_status}` : ""}`
+        : "";
+      return;
+    }
+    batchReportCurrent.textContent = "";
+    if (batchReportSession.state === "completed") {
+      batchReportState.textContent = `批量提报完成\n共 ${total} 条 · 成功 ${success} · 失败 ${failed}`;
+    } else if (batchReportSession.state === "paused") {
+      batchReportState.textContent = `批量已暂停\n已完成 ${completed} 条 · 成功 ${success} · 失败 ${failed}\n${batchReportSession.error || "请确认页面后重新导入任务。"}`;
+    }
+  };
   const renderBinding = () => {
     const session = window.__crawlHubBindingSession;
     const scanControl = window.__crawlHubBindingScanControl;
     bindingDebugModeToggle.checked = bindingDebugModeEnabled;
     bindingDebugModeToggle.disabled = bindingDebugBusy;
     bindingDebugState.textContent = bindingDebugNotice;
-    bindingScanButton.disabled = bindingScanBusy;
+    bindingScanButton.disabled = bindingScanBusy || batchReportBusy;
     bindingScanButton.textContent = bindingHasDebugCache ? "重新扫描并更新缓存" : "扫描商品机会";
-    bindingLocateButton.disabled = bindingLocateBusy;
-    startAutoReportButton.disabled = autoReportBusy;
+    bindingLocateButton.disabled = bindingLocateBusy || batchReportBusy;
+    startAutoReportButton.disabled = autoReportBusy || batchReportBusy;
+    renderBatchReport();
     if (!session) {
       bindingScanState.textContent = "尚未扫描";
       bindingLoaded.hidden = true;
@@ -3549,6 +3746,97 @@ function installPanel() {
     setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
     autoReportState.textContent = log.length ? "调试日志已下载。" : "暂无调试日志，已下载空日志。";
   };
+  const downloadBatchReportResults = () => {
+    if (!batchReportSession.tasks.length) return;
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const blobUrl = URL.createObjectURL(new Blob([batchReportResultsCsv(batchReportSession.tasks)], { type: "text/csv;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = blobUrl;
+    anchor.download = `crawlHub-batch-results-${timestamp}.csv`;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+  };
+  const runBatchReport = async () => {
+    if (batchReportBusy || autoReportBusy || !batchReportSession.tasks.length) return;
+    resetAutoReportDebugLog();
+    window.__crawlHubAutoReportDebugContext = null;
+    batchReportBusy = true;
+    batchReportSession.state = "running";
+    batchReportSession.current_index = -1;
+    batchReportSession.current_status = "";
+    batchReportSession.error = "";
+    batchReportSession.tasks.forEach((task) => {
+      task.status = "pending";
+      task.error = "";
+    });
+    renderBinding();
+    try {
+      for (let index = 0; index < batchReportSession.tasks.length; index += 1) {
+        const task = batchReportSession.tasks[index];
+        try {
+          assertBatchOpportunityMainPage();
+        } catch (error) {
+          batchReportSession.state = "paused";
+          batchReportSession.error = error.message || "页面状态异常，批量已暂停。";
+          break;
+        }
+        batchReportSession.current_index = index;
+        batchReportSession.current_status = "正在打开绑定入口...";
+        task.status = "running";
+        window.__crawlHubAutoReportDebugContext = {
+          batch_index: index + 1,
+          batch_total: batchReportSession.tasks.length,
+          keyword: task.keyword,
+          product_id: task.product_id
+        };
+        addAutoReportDebugLog("start");
+        renderBinding();
+        try {
+          const result = await runSingleProductAutoReport(task.keyword, task.product_id, (status) => {
+            batchReportSession.current_status = status;
+            renderBinding();
+          });
+          task.status = "success";
+          task.error = "";
+          batchReportSession.current_status = "正在返回商品机会列表...";
+          renderBinding();
+          await waitForBatchOpportunityRecovery(result.success_message);
+          addAutoReportDebugLog("batch_item_recovered");
+        } catch (error) {
+          if (task.status === "success") {
+            addAutoReportDebugLog("error", { message: error?.message || "提报后页面未恢复。" });
+            batchReportSession.state = "paused";
+            batchReportSession.error = error?.message || "提报后页面未恢复，批量已暂停。";
+            break;
+          }
+          task.status = "failed";
+          task.error = error?.message || "自动提报未完成。";
+          addAutoReportDebugLog("error", { message: task.error });
+          if (isBatchSystemError(error)) {
+            batchReportSession.state = "paused";
+            batchReportSession.error = task.error;
+            break;
+          }
+          batchReportSession.current_status = "正在恢复商品机会列表...";
+          renderBinding();
+          try {
+            await recoverBatchOpportunityAfterFailure();
+            addAutoReportDebugLog("batch_item_recovered");
+          } catch (recoveryError) {
+            addAutoReportDebugLog("error", { message: recoveryError?.message || "页面未恢复。" });
+            batchReportSession.state = "paused";
+            batchReportSession.error = recoveryError?.message || "页面未恢复，批量已暂停。";
+            break;
+          }
+        }
+      }
+      if (batchReportSession.state === "running") batchReportSession.state = "completed";
+    } finally {
+      window.__crawlHubAutoReportDebugContext = null;
+      batchReportBusy = false;
+      renderBinding();
+    }
+  };
 
   window.__crawlHubSamplingChanged = render;
   analysisModeButton.addEventListener("click", () => setMode("analysis"));
@@ -3676,8 +3964,9 @@ function installPanel() {
       autoReportState.textContent = "请输入商品 ID。";
       return;
     }
-    if (autoReportBusy) return;
+    if (autoReportBusy || batchReportBusy) return;
     resetAutoReportDebugLog();
+    window.__crawlHubAutoReportDebugContext = null;
     addAutoReportDebugLog("start", { keyword, product_id: productId });
     autoReportBusy = true;
     autoReportState.textContent = "正在准备提报...";
@@ -3695,6 +3984,37 @@ function installPanel() {
     }
   });
   exportAutoReportDebugButton.addEventListener("click", downloadAutoReportDebugLog);
+  downloadBatchTemplateButton.addEventListener("click", async () => {
+    batchImportNotice = "正在下载导入模板...";
+    renderBinding();
+    try {
+      await projectStorageRequest("crawlHub:download-batch-template");
+      batchImportNotice = "导入模板已下载。";
+    } catch (error) {
+      batchImportNotice = error?.message || "导入模板下载失败。";
+    } finally {
+      renderBinding();
+    }
+  });
+  importBatchTasksButton.addEventListener("click", () => {
+    if (!batchReportBusy) batchTaskFileInput.click();
+  });
+  batchTaskFileInput.addEventListener("change", async () => {
+    const [file] = batchTaskFileInput.files || [];
+    batchTaskFileInput.value = "";
+    if (!file || batchReportBusy) return;
+    try {
+      if (!/\.csv$/i.test(file.name)) throw new Error("第一版仅支持 CSV 任务文件。");
+      const tasks = parseBatchReportCsv(await file.text());
+      batchReportSession = { state: "imported", tasks, current_index: -1, current_status: "", error: "" };
+      batchImportNotice = "";
+    } catch (error) {
+      batchImportNotice = error?.message || "任务文件导入失败。";
+    }
+    renderBinding();
+  });
+  startBatchReportButton.addEventListener("click", runBatchReport);
+  exportBatchResultsButton.addEventListener("click", downloadBatchReportResults);
   exportSettingsButton.addEventListener("click", async () => {
     try {
       if (typeof window.showDirectoryPicker !== "function") throw new Error("当前浏览器不支持目录选择，请使用最新版 Chrome。");
