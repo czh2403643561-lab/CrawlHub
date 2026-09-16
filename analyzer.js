@@ -1406,7 +1406,15 @@ const BATCH_DEBUG_EVENT_NAMES = {
   target_row_settled: "target_row_settled",
   target_row_settle_timeout: "target_row_settle_timeout",
   already_bound_first_check: "already_bound_first_check",
+  checkbox_pre_click_buffer_start: "checkbox_pre_click_buffer_start",
+  checkbox_pre_click_buffer_finished: "checkbox_pre_click_buffer_finished",
   checkbox_found: "checkbox_found",
+  checkbox_click_attempt: "checkbox_click_attempt",
+  checkbox_checked_confirmed: "checkbox_checked_confirmed",
+  checkbox_retry_started: "checkbox_retry_started",
+  checkbox_retry_clicked: "checkbox_retry_clicked",
+  checkbox_retry_success: "checkbox_retry_success",
+  checkbox_retry_failed: "checkbox_retry_failed",
   checkbox_disabled: "checkbox_disabled",
   checkbox_click_failed: "checkbox_click_failed",
   already_bound_recheck_start: "already_bound_recheck_start",
@@ -1443,6 +1451,11 @@ const BATCH_BUSINESS_STEPS = new Set([
   "target_row_settled",
   "target_row_settle_timeout",
   "product_already_bound",
+  "checkbox_click_attempt",
+  "checkbox_checked_confirmed",
+  "checkbox_retry_clicked",
+  "checkbox_retry_success",
+  "checkbox_retry_failed",
   "checkbox_disabled",
   "checkbox_click_failed",
   "already_bound_recheck_timeout",
@@ -1660,6 +1673,34 @@ function dispatchAutoReportPointerSequence(target, point) {
   target.dispatchEvent(pointerEvent("pointerup", 0));
   target.dispatchEvent(mouseEvent("mouseup", 0));
   target.dispatchEvent(mouseEvent("click", 0));
+}
+
+function clickAutoReportCheckboxControl(checkbox) {
+  if (!checkbox || !isVisiblePageElement(checkbox)) return { dispatched: false, checkbox: null, click_target: null };
+  const rect = checkbox.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return { dispatched: false, checkbox, click_target: null };
+  const point = {
+    clientX: rect.left + rect.width / 2,
+    clientY: rect.top + rect.height / 2,
+    screenX: window.screenX + rect.left + rect.width / 2,
+    screenY: window.screenY + rect.top + rect.height / 2
+  };
+  const clickTarget = document.elementFromPoint(point.clientX, point.clientY);
+  if (clickTarget) {
+    dispatchAutoReportPointerSequence(clickTarget, point);
+  } else {
+    checkbox.dispatchEvent(new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX: point.clientX,
+      clientY: point.clientY,
+      screenX: point.screenX,
+      screenY: point.screenY,
+      button: 0
+    }));
+  }
+  return { dispatched: true, checkbox, click_target: clickTarget || checkbox };
 }
 
 function clickSearchControlForInput(searchInput, { attempt = 1, beforeResults = null } = {}) {
@@ -2067,7 +2108,7 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null, {
   addAutoReportDebugLog("target_product_found", { product_id: productId });
   targetRow = await waitForTargetProductRowSettled(readyDrawer.drawer_root, productId, { timeout: 30000 });
   if (!targetRow) throw new Error("商品搜索结果尚未稳定，请重试。");
-  const findCurrentTargetRow = () => {
+  const refreshUniqueTargetRow = () => {
     const currentInput = document.getElementById("search_content_input");
     const stepOneRoot = currentInput && isVisiblePageElement(currentInput) ? findAutoReportStepOneRoot(currentInput) : null;
     const currentRows = Array.from(stepOneRoot?.querySelectorAll("tr") || []).filter(isVisiblePageElement);
@@ -2076,6 +2117,11 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null, {
       targetRow = currentMatches[0];
       return targetRow;
     }
+    return null;
+  };
+  const findCurrentTargetRow = () => {
+    const refreshedRow = refreshUniqueTargetRow();
+    if (refreshedRow) return refreshedRow;
     return targetRow instanceof Element
       && document.documentElement.contains(targetRow)
       && isVisiblePageElement(targetRow)
@@ -2119,14 +2165,22 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null, {
   addAutoReportDebugLog("already_bound_first_check", { product_id: productId, found: Boolean(initiallyBound) });
   if (initiallyBound) return skipAlreadyBound("first_check");
 
+  addAutoReportDebugLog("checkbox_pre_click_buffer_start", { product_id: productId, buffer_ms: 800 });
+  await waitForPageUpdate(800);
+  addAutoReportDebugLog("checkbox_pre_click_buffer_finished", { product_id: productId, buffer_ms: 800 });
+  targetRow = refreshUniqueTargetRow();
+  if (!targetRow) {
+    if (await recheckAlreadyBound("target_row_changed_after_buffer")) return skipAlreadyBound("target_row_changed_after_buffer");
+    throw new Error("商品搜索结果已变化，请重试。");
+  }
   let checkbox = findRowCheckboxControl(targetRow);
   if (!checkbox) {
     if (await recheckAlreadyBound("checkbox_not_found")) return skipAlreadyBound("checkbox_not_found");
     throw new Error("该商品暂时无法勾选。");
   }
-  addAutoReportDebugLog("checkbox_found", { checkbox: describeAutoReportElement(checkbox) });
+  addAutoReportDebugLog("checkbox_found", { attempt: 1, checkbox: describeAutoReportElement(checkbox) });
   if (!isAvailableRowCheckboxControl(checkbox)) {
-    addAutoReportDebugLog("checkbox_disabled", { checkbox: describeAutoReportElement(checkbox) });
+    addAutoReportDebugLog("checkbox_disabled", { attempt: 1, checkbox: describeAutoReportElement(checkbox) });
     if (await recheckAlreadyBound("checkbox_disabled")) return skipAlreadyBound("checkbox_disabled");
     throw new Error("该商品暂时无法勾选。");
   }
@@ -2134,23 +2188,84 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null, {
     addAutoReportDebugLog("already_bound_recheck_found", { product_id: productId, reason: "before_checkbox_click" });
     return skipAlreadyBound("before_checkbox_click");
   }
-  targetRow = findCurrentTargetRow();
+  targetRow = refreshUniqueTargetRow();
   checkbox = targetRow ? findRowCheckboxControl(targetRow) : null;
   if (!checkbox || !isAvailableRowCheckboxControl(checkbox)) {
-    if (!checkbox) addAutoReportDebugLog("checkbox_click_failed", { product_id: productId, reason: "checkbox_changed" });
-    else addAutoReportDebugLog("checkbox_disabled", { checkbox: describeAutoReportElement(checkbox), reason: "checkbox_changed" });
+    if (!checkbox) addAutoReportDebugLog("checkbox_click_failed", { product_id: productId, attempt: 1, reason: "checkbox_changed" });
+    else addAutoReportDebugLog("checkbox_disabled", { attempt: 1, checkbox: describeAutoReportElement(checkbox), reason: "checkbox_changed" });
     if (await recheckAlreadyBound("checkbox_changed")) return skipAlreadyBound("checkbox_changed");
     throw new Error("该商品暂时无法勾选。");
   }
   updateStatus("正在选择商品...");
   const wasChecked = isProductRowChecked(targetRow);
-  if (!wasChecked) checkbox.click();
-  addAutoReportDebugLog("checkbox_clicked", { checkbox: describeAutoReportElement(checkbox), was_checked: wasChecked, click_dispatched: !wasChecked });
-  const checked = await waitForDomState(() => isProductRowChecked(targetRow));
-  if (!checked) {
-    addAutoReportDebugLog("checkbox_click_failed", { product_id: productId, reason: "checked_state_not_confirmed" });
-    if (await recheckAlreadyBound("checked_state_not_confirmed")) return skipAlreadyBound("checked_state_not_confirmed");
-    throw new Error("未能确认商品已选中。");
+  const firstClick = wasChecked ? { dispatched: false, checkbox, click_target: null } : clickAutoReportCheckboxControl(checkbox);
+  addAutoReportDebugLog("checkbox_click_attempt", {
+    attempt: 1,
+    checkbox: describeAutoReportElement(checkbox),
+    actual_target: describeAutoReportElement(firstClick.click_target),
+    was_checked: wasChecked,
+    click_dispatched: firstClick.dispatched
+  });
+  addAutoReportDebugLog("checkbox_clicked", { attempt: 1, checkbox: describeAutoReportElement(checkbox), was_checked: wasChecked, click_dispatched: firstClick.dispatched });
+  let checked = await waitForDomState(() => {
+    const currentTargetRow = refreshUniqueTargetRow();
+    return currentTargetRow && isProductRowChecked(currentTargetRow);
+  });
+  if (checked) {
+    addAutoReportDebugLog("checkbox_checked_confirmed", { attempt: 1, product_id: productId });
+  } else {
+    addAutoReportDebugLog("checkbox_click_failed", { product_id: productId, attempt: 1, reason: "checked_state_not_confirmed" });
+    await waitForPageUpdate(500);
+    targetRow = refreshUniqueTargetRow();
+    checkbox = targetRow ? findRowCheckboxControl(targetRow) : null;
+    if (!targetRow || !checkbox || !isAvailableRowCheckboxControl(checkbox)) {
+      if (await recheckAlreadyBound("checkbox_retry_unavailable")) return skipAlreadyBound("checkbox_retry_unavailable");
+      addAutoReportDebugLog("checkbox_retry_failed", { attempt: 2, product_id: productId, reason: "checkbox_retry_unavailable" });
+      throw new Error("未能确认商品已选中。");
+    }
+    addAutoReportDebugLog("checkbox_found", { attempt: 2, checkbox: describeAutoReportElement(checkbox), source: "retry" });
+    if (isProductRowChecked(targetRow)) {
+      addAutoReportDebugLog("checkbox_checked_confirmed", { attempt: 2, product_id: productId });
+      addAutoReportDebugLog("checkbox_retry_success", { attempt: 2, product_id: productId, already_checked: true });
+    } else {
+      if (findAlreadyBoundState()) {
+        addAutoReportDebugLog("already_bound_recheck_found", { product_id: productId, reason: "before_checkbox_retry" });
+        return skipAlreadyBound("before_checkbox_retry");
+      }
+      if (await recheckAlreadyBound("checked_state_not_confirmed")) return skipAlreadyBound("checked_state_not_confirmed");
+      addAutoReportDebugLog("checkbox_retry_started", { attempt: 2, product_id: productId });
+      targetRow = refreshUniqueTargetRow();
+      checkbox = targetRow ? findRowCheckboxControl(targetRow) : null;
+      if (!targetRow || !checkbox || !isAvailableRowCheckboxControl(checkbox)) {
+        addAutoReportDebugLog("checkbox_retry_failed", { attempt: 2, product_id: productId, reason: "checkbox_changed_before_retry" });
+        throw new Error("未能确认商品已选中。");
+      }
+      addAutoReportDebugLog("checkbox_found", { attempt: 2, checkbox: describeAutoReportElement(checkbox), source: "retry_after_bound_recheck" });
+      if (isProductRowChecked(targetRow)) {
+        addAutoReportDebugLog("checkbox_checked_confirmed", { attempt: 2, product_id: productId });
+        addAutoReportDebugLog("checkbox_retry_success", { attempt: 2, product_id: productId, already_checked: true });
+      } else {
+        const retryClick = clickAutoReportCheckboxControl(checkbox);
+        addAutoReportDebugLog("checkbox_retry_clicked", {
+          attempt: 2,
+          checkbox: describeAutoReportElement(checkbox),
+          actual_target: describeAutoReportElement(retryClick.click_target),
+          click_dispatched: retryClick.dispatched
+        });
+        checked = await waitForDomState(() => {
+          const currentTargetRow = refreshUniqueTargetRow();
+          return currentTargetRow && isProductRowChecked(currentTargetRow);
+        });
+        if (checked) {
+          addAutoReportDebugLog("checkbox_checked_confirmed", { attempt: 2, product_id: productId });
+          addAutoReportDebugLog("checkbox_retry_success", { attempt: 2, product_id: productId });
+        } else {
+          addAutoReportDebugLog("checkbox_retry_failed", { attempt: 2, product_id: productId, reason: "checked_state_not_confirmed" });
+          if (await recheckAlreadyBound("checkbox_retry_failed")) return skipAlreadyBound("checkbox_retry_failed");
+          throw new Error("未能确认商品已选中。");
+        }
+      }
+    }
   }
   await waitForPageUpdate(350);
 
