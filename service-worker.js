@@ -1,8 +1,15 @@
 const PROJECTS_STORAGE_KEY = "crawlHub.projects.v1";
+const BINDING_CACHES_STORAGE_KEY = "crawlHub.bindingCaches.v1";
+const BINDING_DEBUG_MODES_STORAGE_KEY = "crawlHub.bindingDebugModes.v1";
 
 async function readProjects() {
   const stored = await chrome.storage.local.get(PROJECTS_STORAGE_KEY);
   return stored[PROJECTS_STORAGE_KEY] || {};
+}
+
+async function readStorageMap(key) {
+  const stored = await chrome.storage.local.get(key);
+  return stored[key] || {};
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -10,6 +17,37 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   (async () => {
     if (message.type === "crawlHub:ping") return { connected: true };
+    const cacheKey = String(message.cache_key || "");
+    if (message.type === "crawlHub:read-binding-debug-mode") {
+      const modes = await readStorageMap(BINDING_DEBUG_MODES_STORAGE_KEY);
+      return { enabled: Boolean(modes[cacheKey]) };
+    }
+    if (message.type === "crawlHub:save-binding-debug-mode") {
+      if (!cacheKey) throw new Error("缓存范围不完整");
+      const modes = await readStorageMap(BINDING_DEBUG_MODES_STORAGE_KEY);
+      if (message.enabled) modes[cacheKey] = true;
+      else delete modes[cacheKey];
+      await chrome.storage.local.set({ [BINDING_DEBUG_MODES_STORAGE_KEY]: modes });
+      return { enabled: Boolean(message.enabled) };
+    }
+    if (message.type === "crawlHub:read-binding-cache") {
+      const caches = await readStorageMap(BINDING_CACHES_STORAGE_KEY);
+      return { cache: caches[cacheKey] || null };
+    }
+    if (message.type === "crawlHub:save-binding-cache") {
+      if (!cacheKey || !message.cache) throw new Error("扫描缓存不完整");
+      const caches = await readStorageMap(BINDING_CACHES_STORAGE_KEY);
+      caches[cacheKey] = message.cache;
+      await chrome.storage.local.set({ [BINDING_CACHES_STORAGE_KEY]: caches });
+      return { cache: caches[cacheKey] };
+    }
+    if (message.type === "crawlHub:clear-binding-cache") {
+      if (!cacheKey) throw new Error("缓存范围不完整");
+      const caches = await readStorageMap(BINDING_CACHES_STORAGE_KEY);
+      delete caches[cacheKey];
+      await chrome.storage.local.set({ [BINDING_CACHES_STORAGE_KEY]: caches });
+      return { cleared: true };
+    }
     const projects = await readProjects();
     if (message.type === "crawlHub:save-project") {
       const projectId = String(message.project_id || "");

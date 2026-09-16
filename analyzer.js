@@ -840,6 +840,87 @@ function normalizeOpportunityKeyword(value) {
   return compactOpportunityText(value).replace(/^#\s*/, "").toLowerCase();
 }
 
+function bindingCacheIdentity() {
+  const url = new URL(location.href);
+  const parameterValue = (...names) => names.map((name) => url.searchParams.get(name)).find(Boolean) || "";
+  const scriptValue = (...names) => {
+    for (const script of Array.from(document.scripts || [])) {
+      const content = script.textContent || "";
+      for (const name of names) {
+        const match = content.match(new RegExp(`["']${name}["']\\s*:\\s*["']([^"']+)["']`, "i"));
+        if (match?.[1]) return match[1];
+      }
+    }
+    return "";
+  };
+  const shopRegion = parameterValue("shop_region", "shopRegion") || "unknown-region";
+  const sellerId = parameterValue("seller_id", "sellerId", "global_seller_id", "globalSellerId")
+    || scriptValue("seller_id", "global_seller_id", "unified_seller_id");
+  const shopCode = parameterValue("shop_code", "shopCode") || scriptValue("shop_code");
+  if (!sellerId && !shopCode) return null;
+  return {
+    cache_key: `binding-v1:${location.hostname}:${shopRegion}:${sellerId || "no-seller"}:${shopCode || "no-shop"}`,
+    shop_region: shopRegion,
+    seller_id: sellerId || null,
+    shop_code: shopCode || null
+  };
+}
+
+function bindingCachePayload(session, identity) {
+  return {
+    version: 1,
+    shop_region: identity.shop_region,
+    seller_id: identity.seller_id,
+    shop_code: identity.shop_code,
+    scanned_at: session.scanned_at,
+    cached_at: Date.now(),
+    loaded_count: session.loaded_count,
+    entries: session.entries.map((entry) => ({
+      keyword: entry.keyword,
+      normalized_keyword: entry.normalized_keyword,
+      category: entry.category,
+      scroll_top: entry.scroll_top,
+      row_index: entry.row_index,
+      scanned_at: session.scanned_at,
+      loaded_count: session.loaded_count
+    }))
+  };
+}
+
+async function saveBindingDebugCache(session, identity) {
+  const cache = bindingCachePayload(session, identity);
+  await projectStorageRequest("crawlHub:save-binding-cache", { cache_key: identity.cache_key, cache });
+  return cache;
+}
+
+function restoreBindingSessionFromCache(cache) {
+  if (!cache || !Array.isArray(cache.entries) || !cache.entries.length) return null;
+  const entries = cache.entries
+    .filter((entry) => entry?.keyword && entry?.normalized_keyword)
+    .map((entry) => ({
+      keyword: entry.keyword,
+      normalized_keyword: entry.normalized_keyword,
+      category: entry.category || "",
+      scroll_top: Number(entry.scroll_top) || 0,
+      row_index: Number(entry.row_index) || 0,
+      row: null,
+      container: null
+    }));
+  if (!entries.length) return null;
+  return {
+    state: "completed",
+    source: "cache",
+    entries,
+    loaded_count: Number(cache.loaded_count) || entries.length,
+    scanned_at: Number(cache.scanned_at) || Date.now(),
+    cached_at: Number(cache.cached_at) || Date.now()
+  };
+}
+
+function formatBindingCacheTime(timestamp) {
+  return new Date(timestamp).toLocaleString("zh-CN", { hour12: false });
+}
+
 function isTrendingKeywordsOpportunityPage() {
   const detected = detectProductOpportunityTable();
   if (!detected) return false;
@@ -1021,6 +1102,7 @@ async function scanProductOpportunityBindingIndex(onProgress = null, scanControl
   const updateProgress = (phase) => {
     window.__crawlHubBindingSession = {
       state: "scanning",
+      source: "scan",
       phase,
       entries,
       loaded_count: entries.length,
@@ -1069,7 +1151,7 @@ async function scanProductOpportunityBindingIndex(onProgress = null, scanControl
     restoreScrollPosition: true
   });
   if (!scanResult.completed) throw new Error("未能确认商品机会列表已滚动到底部，请稍后重试。");
-  window.__crawlHubBindingSession = { state: "completed", entries, loaded_count: entries.length, scanned_at: Date.now() };
+  window.__crawlHubBindingSession = { state: "completed", source: "scan", entries, loaded_count: entries.length, scanned_at: Date.now() };
   if (onProgress) onProgress();
   return window.__crawlHubBindingSession;
 }
@@ -2666,7 +2748,7 @@ function stopElementSampling() {
 }
 
 function installPanel() {
-  const panelVersion = "collection-binding-v1";
+  const panelVersion = "collection-binding-cache-v1";
   if (window.__crawlHubPanelHost) {
     if (window.__crawlHubPanelHost.dataset.crawlHubPanelVersion !== panelVersion) {
       stopElementSampling();
@@ -2749,6 +2831,9 @@ function installPanel() {
       .export-options[hidden] { display: none; }
       .binding-card { border-radius: 7px; padding: 10px; background: #fff; color: #475467; }
       .binding-card p { margin: 6px 0 10px; }
+      .binding-debug-toggle { display: flex; align-items: center; gap: 7px; margin-top: 9px; color: #172033; font-weight: 600; cursor: pointer; }
+      .binding-debug-toggle input { width: 15px; height: 15px; margin: 0; }
+      .binding-debug-hint { margin-top: 5px; color: #667085; font-size: 11px; line-height: 1.45; }
       .binding-input { width: 100%; border: 1px solid #d0d5dd; border-radius: 6px; padding: 8px; color: #172033; background: #fff; font: inherit; }
       .binding-count, .binding-status { min-height: 18px; margin-top: 9px; color: #667085; font-size: 12px; }
       .binding-search { margin-top: 12px; padding-top: 12px; border-top: 1px solid #eaecf0; }
@@ -2807,6 +2892,9 @@ function installPanel() {
         <div id="bindingView" class="view" hidden>
           <div class="binding-card">
             <strong>商品绑定</strong>
+            <label class="binding-debug-toggle"><input id="bindingDebugMode" type="checkbox" /><span>调试模式（使用扫描缓存）</span></label>
+            <div class="binding-debug-hint">保存扫描结果，刷新后可直接定位。关闭后会清除缓存。</div>
+            <div id="bindingDebugState" class="binding-status"></div>
             <p>扫描商品机会后，可快速定位对应关键词。</p>
             <div id="bindingScanState" class="binding-status">尚未扫描</div>
             <div id="bindingLoaded" class="binding-count" hidden>已加载：0</div>
@@ -2841,6 +2929,8 @@ function installPanel() {
   const analysisModeButton = shadow.querySelector("#analysisMode");
   const collectionModeButton = shadow.querySelector("#collectionMode");
   const bindingModeButton = shadow.querySelector("#bindingMode");
+  const bindingDebugModeToggle = shadow.querySelector("#bindingDebugMode");
+  const bindingDebugState = shadow.querySelector("#bindingDebugState");
   const bindingKeywordInput = shadow.querySelector("#bindingKeyword");
   const bindingScanButton = shadow.querySelector("#scanBinding");
   const pauseScanTaskButton = shadow.querySelector("#pause_scan_task");
@@ -2892,6 +2982,11 @@ function installPanel() {
   let bindingScanBusy = false;
   let bindingLocateBusy = false;
   let autoReportBusy = false;
+  let bindingDebugModeEnabled = false;
+  let bindingDebugBusy = false;
+  let bindingDebugIdentity = null;
+  let bindingHasDebugCache = false;
+  let bindingDebugNotice = "";
   let previousCollectionPageType = null;
   const header = shadow.querySelector("header");
   const dragState = { active: false, offsetX: 0, offsetY: 0, htmlUserSelect: "", bodyUserSelect: "" };
@@ -3089,7 +3184,11 @@ function installPanel() {
   const renderBinding = () => {
     const session = window.__crawlHubBindingSession;
     const scanControl = window.__crawlHubBindingScanControl;
+    bindingDebugModeToggle.checked = bindingDebugModeEnabled;
+    bindingDebugModeToggle.disabled = bindingDebugBusy;
+    bindingDebugState.textContent = bindingDebugNotice;
     bindingScanButton.disabled = bindingScanBusy;
+    bindingScanButton.textContent = bindingHasDebugCache ? "重新扫描并更新缓存" : "扫描商品机会";
     bindingLocateButton.disabled = bindingLocateBusy;
     startAutoReportButton.disabled = autoReportBusy;
     if (!session) {
@@ -3119,12 +3218,43 @@ function installPanel() {
       autoReportTest.hidden = true;
       return;
     }
+    if (session.source === "cache") {
+      bindingScanState.textContent = `调试模式已开启 · 已加载缓存 ${session.loaded_count} 个商品机会`;
+      bindingLoaded.hidden = false;
+      bindingLoaded.textContent = `缓存时间：${formatBindingCacheTime(session.cached_at)}`;
+      pauseScanTaskButton.hidden = true;
+      bindingSearch.hidden = false;
+      autoReportTest.hidden = false;
+      return;
+    }
     bindingScanState.textContent = "扫描完成";
     bindingLoaded.hidden = false;
     bindingLoaded.textContent = `已发现：${session.loaded_count} 个商品机会`;
     pauseScanTaskButton.hidden = true;
     bindingSearch.hidden = false;
     autoReportTest.hidden = false;
+  };
+  const restoreBindingDebugCache = async () => {
+    bindingDebugIdentity = bindingCacheIdentity();
+    if (!bindingDebugIdentity) {
+      bindingDebugNotice = "当前店铺未识别，调试缓存暂不可用。";
+      renderBinding();
+      return;
+    }
+    try {
+      const mode = await projectStorageRequest("crawlHub:read-binding-debug-mode", { cache_key: bindingDebugIdentity.cache_key });
+      bindingDebugModeEnabled = Boolean(mode.enabled);
+      if (bindingDebugModeEnabled) {
+        const result = await projectStorageRequest("crawlHub:read-binding-cache", { cache_key: bindingDebugIdentity.cache_key });
+        const restored = restoreBindingSessionFromCache(result.cache);
+        bindingHasDebugCache = Boolean(restored);
+        if (restored && !window.__crawlHubBindingSession) window.__crawlHubBindingSession = restored;
+        if (!restored) bindingDebugNotice = "调试模式已开启，完成扫描后会保存结果。";
+      }
+    } catch {
+      bindingDebugNotice = "调试缓存暂不可用，请重新扫描。";
+    }
+    renderBinding();
   };
   const reconnectPage = async () => {
     setMessage("正在检查页面连接…");
@@ -3210,6 +3340,48 @@ function installPanel() {
   bindingModeButton.addEventListener("click", () => {
     setMode("binding");
   });
+  bindingDebugModeToggle.addEventListener("change", async () => {
+    if (bindingDebugBusy) return;
+    const shouldEnable = bindingDebugModeToggle.checked;
+    bindingDebugIdentity ||= bindingCacheIdentity();
+    if (!bindingDebugIdentity) {
+      bindingDebugNotice = "当前店铺未识别，调试缓存暂不可用。";
+      renderBinding();
+      return;
+    }
+    bindingDebugBusy = true;
+    renderBinding();
+    try {
+      if (shouldEnable) {
+        await projectStorageRequest("crawlHub:save-binding-debug-mode", { cache_key: bindingDebugIdentity.cache_key, enabled: true });
+        bindingDebugModeEnabled = true;
+        const session = window.__crawlHubBindingSession;
+        if (session?.state === "completed" && session.source === "scan") {
+          await saveBindingDebugCache(session, bindingDebugIdentity);
+          bindingHasDebugCache = true;
+          bindingDebugNotice = "调试模式已开启，已保存当前扫描结果。";
+        } else {
+          const result = await projectStorageRequest("crawlHub:read-binding-cache", { cache_key: bindingDebugIdentity.cache_key });
+          const restored = restoreBindingSessionFromCache(result.cache);
+          bindingHasDebugCache = Boolean(restored);
+          if (restored) window.__crawlHubBindingSession = restored;
+          bindingDebugNotice = restored ? "" : "调试模式已开启，完成扫描后会保存结果。";
+        }
+      } else {
+        await projectStorageRequest("crawlHub:clear-binding-cache", { cache_key: bindingDebugIdentity.cache_key });
+        await projectStorageRequest("crawlHub:save-binding-debug-mode", { cache_key: bindingDebugIdentity.cache_key, enabled: false });
+        bindingDebugModeEnabled = false;
+        bindingHasDebugCache = false;
+        if (window.__crawlHubBindingSession?.source === "cache") delete window.__crawlHubBindingSession;
+        bindingDebugNotice = "调试缓存已清除，后续使用需重新扫描。";
+      }
+    } catch {
+      bindingDebugNotice = "调试缓存操作失败，请稍后重试。";
+    } finally {
+      bindingDebugBusy = false;
+      renderBinding();
+    }
+  });
   bindingScanButton.addEventListener("click", async () => {
     if (bindingScanBusy) return;
     bindingScanBusy = true;
@@ -3217,13 +3389,22 @@ function installPanel() {
     window.__crawlHubBindingScanControl = scanControl;
     bindingKeywordInput.value = "";
     bindingLocateState.textContent = "";
-    window.__crawlHubBindingSession = { state: "scanning", entries: [], loaded_count: 0 };
+    window.__crawlHubBindingSession = { state: "scanning", source: "scan", entries: [], loaded_count: 0 };
     renderBinding();
     await waitForPageUpdate(0);
     try {
-      await scanProductOpportunityBindingIndex(renderBinding, scanControl);
+      const session = await scanProductOpportunityBindingIndex(renderBinding, scanControl);
+      if (bindingDebugModeEnabled && bindingDebugIdentity) {
+        try {
+          await saveBindingDebugCache(session, bindingDebugIdentity);
+          bindingHasDebugCache = true;
+          bindingDebugNotice = "调试模式已开启，扫描缓存已更新。";
+        } catch {
+          bindingDebugNotice = "扫描完成，但未能保存调试缓存。";
+        }
+      }
     } catch (error) {
-      window.__crawlHubBindingSession = { state: "error", entries: [], loaded_count: 0, error: error.message || "暂时无法扫描商品机会。" };
+      window.__crawlHubBindingSession = { state: "error", source: "scan", entries: [], loaded_count: 0, error: error.message || "暂时无法扫描商品机会。" };
     } finally {
       scanControl.active = false;
       scanControl.paused = false;
@@ -3513,6 +3694,7 @@ function installPanel() {
     delete window.__crawlHubCollectionRender;
   });
   setMode(window.__crawlHubMode || "analysis");
+  void restoreBindingDebugCache();
   void checkDetectedTaskChange();
   return { started: true, already_open: false };
 }

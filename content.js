@@ -20,7 +20,10 @@ const storageBridgeHandler = async (event) => {
     const response = await globalThis.chrome.runtime.sendMessage({
       type: request.type,
       project_id: request.project_id,
-      project: request.project
+      project: request.project,
+      cache_key: request.cache_key,
+      cache: request.cache,
+      enabled: request.enabled
     });
     document.dispatchEvent(new CustomEvent(storageResponseEvent, {
       detail: { request_id: request.request_id, ...(response || { ok: false, error: "本地数据服务未响应" }) }
