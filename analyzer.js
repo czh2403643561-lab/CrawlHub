@@ -1270,6 +1270,92 @@ function resetAutoReportDebugLog() {
   window.__crawlHubAutoReportDebugLog = [];
 }
 
+const BATCH_ITEM_COOLDOWN_MS = 3000;
+
+const BATCH_DEBUG_EVENT_NAMES = {
+  start: "batch_item_start",
+  binding_opened: "binding_opened",
+  step_one_ready: "step_one_ready",
+  product_id_written: "product_id_written",
+  search_click_dispatched: "search_clicked",
+  search_result_changed: "search_result_changed",
+  product_found: "product_found",
+  product_already_bound: "product_already_bound",
+  checkbox_clicked: "checkbox_clicked",
+  next_clicked: "next_clicked",
+  submit_clicked: "submit_clicked",
+  success: "success_toast_detected",
+  drawer_close_clicked: "drawer_close_clicked",
+  main_page_recovered: "main_page_recovered",
+  cooldown_started: "cooldown_started",
+  cooldown_finished: "cooldown_finished",
+  batch_item_success: "batch_item_success",
+  batch_item_skipped: "batch_item_skipped",
+  batch_item_failed: "batch_item_failed",
+  error: "error"
+};
+
+function resetBatchDebugLog(total) {
+  window.__crawlHubBatchDebugLog = {
+    run: {
+      started_at: new Date().toISOString(),
+      finished_at: null,
+      total,
+      cooldown_ms: BATCH_ITEM_COOLDOWN_MS
+    },
+    items: []
+  };
+}
+
+function batchDebugSafeDetails(details) {
+  const sensitive = /(?:cookie|token|authorization|response(?:_body)?)/i;
+  return Object.fromEntries(Object.entries(details || {}).filter(([key]) => !sensitive.test(key)));
+}
+
+function getBatchDebugItem() {
+  const context = window.__crawlHubAutoReportDebugContext;
+  const log = window.__crawlHubBatchDebugLog;
+  if (!context || !log || !Array.isArray(log.items) || !Number.isInteger(context.batch_index)) return null;
+  let item = log.items.find((candidate) => candidate.index === context.batch_index);
+  if (!item) {
+    item = {
+      index: context.batch_index,
+      keyword: context.keyword,
+      product_id: context.product_id,
+      started_at: new Date().toISOString(),
+      finished_at: null,
+      duration_ms: null,
+      final_status: null,
+      error: "",
+      last_step: "",
+      events: []
+    };
+    log.items.push(item);
+  }
+  return item;
+}
+
+function addBatchDebugEvent(step, details = {}) {
+  const item = getBatchDebugItem();
+  if (!item) return;
+  item.last_step = step;
+  item.events.push({ at: new Date().toISOString(), step, ...batchDebugSafeDetails(details) });
+}
+
+function finishBatchDebugItem(status, error = "") {
+  const item = getBatchDebugItem();
+  if (!item) return;
+  item.finished_at = new Date().toISOString();
+  item.duration_ms = Math.max(0, new Date(item.finished_at).getTime() - new Date(item.started_at).getTime());
+  item.final_status = status;
+  item.error = error || "";
+}
+
+function finishBatchDebugRun() {
+  const log = window.__crawlHubBatchDebugLog;
+  if (log?.run) log.run.finished_at = new Date().toISOString();
+}
+
 function addAutoReportDebugLog(step, details = {}) {
   if (!Array.isArray(window.__crawlHubAutoReportDebugLog)) resetAutoReportDebugLog();
   const batchContext = window.__crawlHubAutoReportDebugContext;
@@ -1279,6 +1365,8 @@ function addAutoReportDebugLog(step, details = {}) {
     ...(batchContext && typeof batchContext === "object" ? batchContext : {}),
     ...details
   });
+  const batchStep = BATCH_DEBUG_EVENT_NAMES[step];
+  if (batchStep && batchContext) addBatchDebugEvent(batchStep, details);
 }
 
 function describeAutoReportElement(element) {
@@ -1565,8 +1653,9 @@ async function waitForBatchOpportunityRecovery(successMessage = null) {
       && isVisiblePageElement(successMessage);
     if (messageVisible || findVisibleAutoReportDrawerRoot()) return null;
     return hasVisibleProductOpportunityOperationHeader() ? true : null;
-  }, { timeout: 15000 });
+  }, { timeout: 30000 });
   if (!recovered) throw createBatchSystemError("未能回到商品机会主列表，批量已暂停。");
+  addAutoReportDebugLog("main_page_recovered");
 }
 
 async function recoverBatchOpportunityAfterFailure() {
@@ -1653,10 +1742,10 @@ function batchReportResultsCsv(tasks) {
     const text = String(value ?? "");
     return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   };
-  return ["keyword,product_id,status,error", ...tasks.map((task) => [task.keyword, task.product_id, task.status, task.error].map(escapeCell).join(","))].join("\r\n");
+  return ["index,keyword,product_id,status,error", ...tasks.map((task, index) => [index + 1, task.keyword, task.product_id, task.status, task.error].map(escapeCell).join(","))].join("\r\n");
 }
 
-async function runSingleProductAutoReport(keyword, productId, onStatus = null) {
+async function runSingleProductAutoReport(keyword, productId, onStatus = null, { deferBatchRecovery = false } = {}) {
   const session = window.__crawlHubBindingSession;
   if (!session || session.state !== "completed") throw new Error("请先完成商品机会扫描。");
   const updateStatus = (message) => {
@@ -1667,7 +1756,7 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null) {
   await openExistingProductBinding(keyword);
   addAutoReportDebugLog("binding_opened");
   updateStatus("正在等待商品列表加载...");
-  const readyDrawer = await waitForDomState(findReadyAutoReportStepOneDrawer, { timeout: 15000 });
+  const readyDrawer = await waitForDomState(findReadyAutoReportStepOneDrawer, { timeout: 30000 });
   if (!readyDrawer) throw new Error("商品选择页面尚未加载完成，请稍后重试。");
   addAutoReportDebugLog("step_one_ready", { drawer: describeAutoReportElement(readyDrawer.drawer_root) });
   const searchInput = findReadyAutoReportSearchInput(readyDrawer);
@@ -1722,7 +1811,7 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null) {
   };
   updateStatus("正在搜索商品...");
   triggerProductSearch(searchInput);
-  let searchResult = await waitForDomState(readMatchingRows, { timeout: 15000 });
+  let searchResult = await waitForDomState(readMatchingRows, { timeout: 30000 });
   if (searchResult?.empty) throw new Error("商品搜索结果中没有此商品 ID。");
   let matchingRows = searchResult?.matches || null;
   if (!matchingRows) {
@@ -1731,7 +1820,7 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null) {
     if (stillOnStepOne && currentInput && isVisiblePageElement(currentInput)) {
       if (currentInput.value === productId) {
         triggerProductSearch(currentInput);
-        searchResult = await waitForDomState(readMatchingRows, { timeout: 15000 });
+        searchResult = await waitForDomState(readMatchingRows, { timeout: 30000 });
         if (searchResult?.empty) throw new Error("商品搜索结果中没有此商品 ID。");
         matchingRows = searchResult?.matches || null;
       }
@@ -1750,6 +1839,10 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null) {
     const drawerRoot = findAutoReportStepOneDrawerRoot();
     if (!drawerRoot) throw createAlreadyBoundSystemError("已识别商品已绑定，但未找到当前提报窗口。");
     if (!clickAutoReportDrawerCloseIcon(drawerRoot)) throw createAlreadyBoundSystemError("已识别商品已绑定，但未找到右上角关闭图标。");
+    if (deferBatchRecovery) {
+      updateStatus("商品已绑定，已跳过。");
+      return { keyword, product_id: productId, skipped: true, skip_reason: "商品已绑定", recovery_pending: true };
+    }
     try {
       await waitForBatchOpportunityRecovery();
     } catch (error) {
@@ -1778,7 +1871,7 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null) {
     const submitButton = findVisibleTextButton("提交");
     const firstStepInput = document.getElementById("search_content_input");
     return hasStepTwoTitle || (submitButton && (!firstStepInput || !isVisiblePageElement(firstStepInput)));
-  });
+  }, { timeout: 20000 });
   if (!stepTwoReady) throw new Error("未能进入添加关键词步骤。");
   await waitForPageUpdate(350);
 
@@ -1789,7 +1882,7 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null) {
   submitButton.click();
   addAutoReportDebugLog("submit_clicked", { button: describeAutoReportElement(submitButton) });
   const submitted = await waitForDomState(() => findVisibleAutoReportSuccessMessages()
-    .find((element) => !previousSuccessMessages.has(element)), { timeout: 10000 });
+    .find((element) => !previousSuccessMessages.has(element)), { timeout: 30000 });
   if (!submitted) throw new Error("提交后未看到成功提示。");
   addAutoReportDebugLog("success", { message: describeAutoReportElement(submitted) });
   updateStatus("提报成功。");
@@ -3332,7 +3425,7 @@ function installPanel() {
                 <div id="batchReportState" class="binding-status" style="white-space: pre-line;" hidden></div>
                 <div id="batchReportCurrent" class="binding-status" style="white-space: pre-line;" hidden></div>
               </div>
-              <details style="margin-top: 12px;"><summary>调试工具 ▸</summary><div class="actions" style="margin-top: 7px;"><button id="exportAutoReportDebug" class="secondary" type="button">导出调试日志</button></div></details>
+              <details style="margin-top: 12px;"><summary>调试工具 ▸</summary><div class="actions" style="margin-top: 7px;"><button id="exportAutoReportDebug" class="secondary" type="button">导出调试日志</button><button id="exportBatchDebug" class="secondary" type="button">导出批量调试日志</button></div></details>
             </div>
           </div>
         </div>
@@ -3366,6 +3459,7 @@ function installPanel() {
   const autoReportProductIdInput = shadow.querySelector("#autoReportProductId");
   const startAutoReportButton = shadow.querySelector("#startAutoReport");
   const exportAutoReportDebugButton = shadow.querySelector("#exportAutoReportDebug");
+  const exportBatchDebugButton = shadow.querySelector("#exportBatchDebug");
   const autoReportState = shadow.querySelector("#autoReportState");
   const downloadBatchTemplateButton = shadow.querySelector("#downloadBatchTemplate");
   const importBatchTasksButton = shadow.querySelector("#importBatchTasks");
@@ -3414,7 +3508,7 @@ function installPanel() {
   let bindingLocateBusy = false;
   let autoReportBusy = false;
   let batchReportBusy = false;
-  let batchReportSession = { state: "idle", tasks: [], current_index: -1, current_status: "", error: "" };
+  let batchReportSession = { state: "idle", phase: "", tasks: [], current_index: -1, current_status: "", error: "" };
   let batchImportNotice = "";
   let bindingDebugModeEnabled = false;
   let bindingDebugBusy = false;
@@ -3629,7 +3723,8 @@ function installPanel() {
     importBatchTasksButton.disabled = running;
     startBatchReportButton.hidden = !total || running;
     startBatchReportButton.disabled = autoReportBusy || batchReportBusy;
-    exportBatchResultsButton.hidden = !total || !["completed", "paused"].includes(batchReportSession.state);
+    const hasBusinessResults = batchReportSession.tasks.some((task) => ["success", "skipped", "failed"].includes(task.status));
+    exportBatchResultsButton.hidden = !total || (!hasBusinessResults && !["completed", "paused"].includes(batchReportSession.state));
     if (batchImportNotice) batchImportState.textContent = batchImportNotice;
     else if (total) batchImportState.textContent = `已导入 ${total} 条任务`;
     else batchImportState.textContent = "";
@@ -3637,6 +3732,11 @@ function installPanel() {
     batchReportCurrent.hidden = !running;
     if (running) {
       const current = batchReportSession.tasks[batchReportSession.current_index];
+      if (batchReportSession.phase === "cooldown") {
+        batchReportState.textContent = `第 ${batchReportSession.current_index + 1} / ${total} 条处理完成\n3 秒后继续下一条…\n已完成 ${completed} 条 · 成功 ${success} · 跳过 ${skipped} · 失败 ${failed}`;
+        batchReportCurrent.textContent = "";
+        return;
+      }
       batchReportState.textContent = `正在处理第 ${batchReportSession.current_index + 1} / ${total} 条\n已完成 ${completed} 条 · 成功 ${success} · 跳过 ${skipped} · 失败 ${failed}`;
       batchReportCurrent.textContent = current
         ? `当前：\n${current.keyword}\n${current.product_id}${batchReportSession.current_status ? `\n${batchReportSession.current_status}` : ""}`
@@ -3822,12 +3922,24 @@ function installPanel() {
     anchor.click();
     setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
   };
+  const downloadBatchDebugLog = () => {
+    const log = window.__crawlHubBatchDebugLog || { run: null, items: [] };
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const blobUrl = URL.createObjectURL(new Blob([JSON.stringify(log, null, 2)], { type: "application/json" }));
+    const anchor = document.createElement("a");
+    anchor.href = blobUrl;
+    anchor.download = `crawlHub-batch-debug-${timestamp}.json`;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+  };
   const runBatchReport = async () => {
     if (batchReportBusy || autoReportBusy || !batchReportSession.tasks.length) return;
     resetAutoReportDebugLog();
+    resetBatchDebugLog(batchReportSession.tasks.length);
     window.__crawlHubAutoReportDebugContext = null;
     batchReportBusy = true;
     batchReportSession.state = "running";
+    batchReportSession.phase = "running";
     batchReportSession.current_index = -1;
     batchReportSession.current_status = "";
     batchReportSession.error = "";
@@ -3836,6 +3948,15 @@ function installPanel() {
       task.error = "";
     });
     renderBinding();
+    const waitForBatchItemCooldown = async (index) => {
+      batchReportSession.phase = "cooldown";
+      batchReportSession.current_status = `第 ${index + 1} / ${batchReportSession.tasks.length} 条处理完成，3 秒后继续下一条…`;
+      addAutoReportDebugLog("cooldown_started", { cooldown_ms: BATCH_ITEM_COOLDOWN_MS });
+      renderBinding();
+      await waitForPageUpdate(BATCH_ITEM_COOLDOWN_MS);
+      addAutoReportDebugLog("cooldown_finished", { cooldown_ms: BATCH_ITEM_COOLDOWN_MS });
+      batchReportSession.phase = "running";
+    };
     try {
       for (let index = 0; index < batchReportSession.tasks.length; index += 1) {
         const task = batchReportSession.tasks[index];
@@ -3861,42 +3982,57 @@ function installPanel() {
           const result = await runSingleProductAutoReport(task.keyword, task.product_id, (status) => {
             batchReportSession.current_status = status;
             renderBinding();
-          });
+          }, { deferBatchRecovery: true });
           if (result.skipped) {
             task.status = "skipped";
             task.error = result.skip_reason || "商品已绑定";
             batchReportSession.current_status = "商品已绑定，已跳过。";
             addAutoReportDebugLog("batch_item_skipped", { reason: task.error });
-            addAutoReportDebugLog("batch_item_recovered");
             renderBinding();
+            await waitForBatchOpportunityRecovery();
+            await waitForBatchItemCooldown(index);
+            finishBatchDebugItem("skipped");
             continue;
           }
           task.status = "success";
           task.error = "";
           batchReportSession.current_status = "正在返回商品机会列表...";
+          addAutoReportDebugLog("batch_item_success");
           renderBinding();
           await waitForBatchOpportunityRecovery(result.success_message);
-          addAutoReportDebugLog("batch_item_recovered");
+          await waitForBatchItemCooldown(index);
+          finishBatchDebugItem("success");
         } catch (error) {
           if (error?.product_already_bound) {
             task.status = "skipped";
             task.error = "商品已绑定";
             addAutoReportDebugLog("batch_item_skipped", { reason: task.error });
             addAutoReportDebugLog("error", { message: error.message || "已绑定商品关闭失败。" });
+            finishBatchDebugItem("skipped", error.message || "已绑定商品关闭失败。");
             batchReportSession.state = "paused";
             batchReportSession.error = error.message || "已绑定商品关闭失败，批量已暂停。";
             break;
           }
           if (task.status === "success") {
             addAutoReportDebugLog("error", { message: error?.message || "提报后页面未恢复。" });
+            finishBatchDebugItem("success", error?.message || "提报后页面未恢复。");
             batchReportSession.state = "paused";
-            batchReportSession.error = error?.message || "提报后页面未恢复，批量已暂停。";
+            batchReportSession.error = "当前商品已提交成功，但页面未恢复，批量已暂停。";
+            break;
+          }
+          if (task.status === "skipped") {
+            addAutoReportDebugLog("error", { message: error?.message || "已绑定商品关闭后页面未恢复。" });
+            finishBatchDebugItem("skipped", error?.message || "已绑定商品关闭后页面未恢复。");
+            batchReportSession.state = "paused";
+            batchReportSession.error = "当前商品已跳过，但页面未恢复，批量已暂停。";
             break;
           }
           task.status = "failed";
           task.error = error?.message || "自动提报未完成。";
           addAutoReportDebugLog("error", { message: task.error });
+          addAutoReportDebugLog("batch_item_failed", { error: task.error });
           if (isBatchSystemError(error)) {
+            finishBatchDebugItem("failed", task.error);
             batchReportSession.state = "paused";
             batchReportSession.error = task.error;
             break;
@@ -3905,9 +4041,11 @@ function installPanel() {
           renderBinding();
           try {
             await recoverBatchOpportunityAfterFailure();
-            addAutoReportDebugLog("batch_item_recovered");
+            await waitForBatchItemCooldown(index);
+            finishBatchDebugItem("failed", task.error);
           } catch (recoveryError) {
             addAutoReportDebugLog("error", { message: recoveryError?.message || "页面未恢复。" });
+            finishBatchDebugItem("failed", recoveryError?.message || "页面未恢复。");
             batchReportSession.state = "paused";
             batchReportSession.error = recoveryError?.message || "页面未恢复，批量已暂停。";
             break;
@@ -3916,6 +4054,8 @@ function installPanel() {
       }
       if (batchReportSession.state === "running") batchReportSession.state = "completed";
     } finally {
+      batchReportSession.phase = "";
+      finishBatchDebugRun();
       window.__crawlHubAutoReportDebugContext = null;
       batchReportBusy = false;
       renderBinding();
@@ -4068,6 +4208,7 @@ function installPanel() {
     }
   });
   exportAutoReportDebugButton.addEventListener("click", downloadAutoReportDebugLog);
+  exportBatchDebugButton.addEventListener("click", downloadBatchDebugLog);
   downloadBatchTemplateButton.addEventListener("click", async () => {
     batchImportNotice = "正在下载导入模板...";
     renderBinding();
@@ -4097,7 +4238,7 @@ function installPanel() {
     try {
       if (!/\.csv$/i.test(file.name)) throw new Error("第一版仅支持 CSV 任务文件。");
       const tasks = parseBatchReportCsv(await file.text());
-      batchReportSession = { state: "imported", tasks, current_index: -1, current_status: "", error: "" };
+      batchReportSession = { state: "imported", phase: "", tasks, current_index: -1, current_status: "", error: "" };
       batchImportNotice = "";
     } catch (error) {
       batchImportNotice = error?.message || "任务文件导入失败。";
