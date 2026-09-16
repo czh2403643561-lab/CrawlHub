@@ -1300,22 +1300,12 @@ function findAutoReportStepOneDrawerRoot() {
 function findReadyAutoReportStepOneDrawer() {
   const drawerRoot = findAutoReportStepOneDrawerRoot();
   if (!drawerRoot) return null;
-  const requiredHeaders = ["商品名称", "原价", "库存"];
-  const headerRegion = Array.from(drawerRoot.querySelectorAll("thead, table")).find((candidate) => {
-    const headers = Array.from(candidate.querySelectorAll("th"))
-      .filter(isVisiblePageElement)
-      .map((header) => compactOpportunityText(header.innerText || header.textContent || ""));
-    return requiredHeaders.every((header) => headers.includes(header));
-  }) || null;
-  const dataRow = Array.from(drawerRoot.querySelectorAll("tbody tr")).find((row) => {
-    const hasCells = Boolean(row.querySelector("td"));
-    const checkbox = findRowCheckboxControl(row);
-    const productText = compactOpportunityText(row.innerText || row.textContent || "");
-    return isVisiblePageElement(row) && hasCells && Boolean(checkbox) && Boolean(productText);
-  }) || null;
+  const keywordHeader = Array.from(drawerRoot.querySelectorAll("th, [role='columnheader']"))
+    .find((header) => isVisiblePageElement(header)
+      && compactOpportunityText(header.innerText || header.textContent || "") === "商品名称") || null;
   const searchInput = drawerRoot.querySelector("#search_content_input");
-  if (!headerRegion || !dataRow || !searchInput || !isVisiblePageElement(searchInput)) return null;
-  return { drawer_root: drawerRoot, header_region: headerRegion, data_row: dataRow, search_input: searchInput };
+  if (!keywordHeader || !searchInput || !isVisiblePageElement(searchInput)) return null;
+  return { drawer_root: drawerRoot, keyword_header: keywordHeader, search_input: searchInput };
 }
 
 function findAutoReportStepOneRoot(searchInput) {
@@ -3315,8 +3305,9 @@ function installPanel() {
         if (restored && !window.__crawlHubBindingSession) window.__crawlHubBindingSession = restored;
         if (!restored) bindingDebugNotice = "调试模式已开启，完成扫描后会保存结果。";
       }
-    } catch {
-      bindingDebugNotice = "调试缓存暂不可用，请重新扫描。";
+    } catch (error) {
+      bindingDebugNotice = error?.message || "调试缓存暂不可用，请重新扫描。";
+      console.error("[CrawlHub] binding debug cache restore failed", error);
     }
     renderBinding();
   };
@@ -3439,8 +3430,9 @@ function installPanel() {
         if (window.__crawlHubBindingSession?.source === "cache") delete window.__crawlHubBindingSession;
         bindingDebugNotice = "调试缓存已清除，后续使用需重新扫描。";
       }
-    } catch {
-      bindingDebugNotice = "调试缓存操作失败，请稍后重试。";
+    } catch (error) {
+      bindingDebugNotice = error?.message || "调试缓存操作失败，请稍后重试。";
+      console.error("[CrawlHub] binding debug cache operation failed", error);
     } finally {
       bindingDebugBusy = false;
       renderBinding();
@@ -3463,8 +3455,9 @@ function installPanel() {
           await saveBindingDebugCache(session, bindingDebugIdentity);
           bindingHasDebugCache = true;
           bindingDebugNotice = "调试模式已开启，扫描缓存已更新。";
-        } catch {
-          bindingDebugNotice = "扫描完成，但未能保存调试缓存。";
+        } catch (error) {
+          bindingDebugNotice = error?.message || "扫描完成，但未能保存调试缓存。";
+          console.error("[CrawlHub] binding debug cache save failed", error);
         }
       }
     } catch (error) {
