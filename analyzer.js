@@ -1301,16 +1301,21 @@ function findReadyAutoReportStepOneDrawer() {
   const drawerRoot = findAutoReportStepOneDrawerRoot();
   if (!drawerRoot) return null;
   const requiredHeaders = ["商品名称", "原价", "库存"];
-  const table = Array.from(drawerRoot.querySelectorAll("table")).find((candidate) => {
-    const headers = Array.from(candidate.querySelectorAll("thead th"))
+  const headerRegion = Array.from(drawerRoot.querySelectorAll("thead, table")).find((candidate) => {
+    const headers = Array.from(candidate.querySelectorAll("th"))
       .filter(isVisiblePageElement)
       .map((header) => compactOpportunityText(header.innerText || header.textContent || ""));
-    const hasHeaders = requiredHeaders.every((header) => headers.includes(header));
-    const hasVisibleDataRow = Array.from(candidate.querySelectorAll("tbody tr"))
-      .some((row) => isVisiblePageElement(row) && Boolean(row.querySelector("td")));
-    return hasHeaders && hasVisibleDataRow;
+    return requiredHeaders.every((header) => headers.includes(header));
   }) || null;
-  return table ? { drawer_root: drawerRoot, table } : null;
+  const dataRow = Array.from(drawerRoot.querySelectorAll("tbody tr")).find((row) => {
+    const hasCells = Boolean(row.querySelector("td"));
+    const checkbox = findRowCheckboxControl(row);
+    const productText = compactOpportunityText(row.innerText || row.textContent || "");
+    return isVisiblePageElement(row) && hasCells && Boolean(checkbox) && Boolean(productText);
+  }) || null;
+  const searchInput = drawerRoot.querySelector("#search_content_input");
+  if (!headerRegion || !dataRow || !searchInput || !isVisiblePageElement(searchInput)) return null;
+  return { drawer_root: drawerRoot, header_region: headerRegion, data_row: dataRow, search_input: searchInput };
 }
 
 function findAutoReportStepOneRoot(searchInput) {
@@ -1320,12 +1325,21 @@ function findAutoReportStepOneRoot(searchInput) {
 }
 
 function findReadyAutoReportSearchInput(readyDrawer) {
-  const input = readyDrawer?.drawer_root?.querySelector("#search_content_input") || null;
+  const input = readyDrawer?.search_input || null;
   return input && isVisiblePageElement(input) ? input : null;
 }
 
 function isAutoReportStillOnStepOne() {
   return Boolean(findAutoReportStepOneDrawerRoot());
+}
+
+function hasExplicitEmptyProductResults(drawerRoot) {
+  return Array.from(drawerRoot.querySelectorAll("*")).some((element) => {
+    if (!isVisiblePageElement(element)) return false;
+    const text = compactOpportunityText(element.innerText || element.textContent || "");
+    if (!/^(?:暂无数据|暂无商品|未找到相关商品|no data|no results)$/i.test(text)) return false;
+    return !Array.from(element.children).some((child) => compactOpportunityText(child.innerText || child.textContent || "") === text);
+  });
 }
 
 function rowContainsCompleteProductId(row, productId) {
@@ -1364,15 +1378,16 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null) {
   updateStatus("正在等待商品列表加载...");
   const readyDrawer = await waitForDomState(findReadyAutoReportStepOneDrawer, { timeout: 15000 });
   if (!readyDrawer) throw new Error("商品选择页面尚未加载完成，请稍后重试。");
-  const searchInput = await waitForDomState(() => findReadyAutoReportSearchInput(findReadyAutoReportStepOneDrawer()), { timeout: 2000 });
+  const searchInput = findReadyAutoReportSearchInput(readyDrawer);
   if (!searchInput) throw new Error("商品选择页面尚未加载完成，请稍后重试。");
 
   updateStatus("正在输入商品 ID...");
   setNativeInputValue(searchInput, productId);
   if (searchInput.value !== productId) throw new Error("商品 ID 未能写入搜索框，请重试。");
-  await waitForPageUpdate(1000);
+  const searchControl = findSearchControlForInput(searchInput);
+  if (!searchControl || !isAvailableDomControl(searchControl)) throw new Error("商品选择页面尚未加载完成，请稍后重试。");
   updateStatus("正在搜索商品...");
-  triggerSearchForInput(searchInput);
+  if (!triggerSearchForInput(searchInput)) throw new Error("商品选择页面尚未加载完成，请稍后重试。");
   const readMatchingRows = () => {
     const currentInput = document.getElementById("search_content_input");
     if (!currentInput || !isVisiblePageElement(currentInput)) return null;
@@ -1380,16 +1395,20 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null) {
     if (!stepOneRoot) return null;
     const rows = Array.from(stepOneRoot.querySelectorAll("tr")).filter(isVisiblePageElement);
     const matches = rows.filter((row) => rowContainsCompleteProductId(row, productId));
-    return matches.length ? matches : null;
+    if (matches.length) return { matches };
+    return hasExplicitEmptyProductResults(stepOneRoot) ? { empty: true } : null;
   };
-  let matchingRows = await waitForDomState(readMatchingRows, { timeout: 15000 });
+  let searchResult = await waitForDomState(readMatchingRows, { timeout: 15000 });
+  if (searchResult?.empty) throw new Error("商品搜索结果中没有此商品 ID。");
+  let matchingRows = searchResult?.matches || null;
   if (!matchingRows) {
     const currentInput = document.getElementById("search_content_input");
     const stillOnStepOne = isAutoReportStillOnStepOne();
     if (stillOnStepOne && currentInput && isVisiblePageElement(currentInput)) {
-      await waitForPageUpdate(2000);
       if (currentInput.value === productId) clickSearchControlForInput(currentInput);
-      matchingRows = await waitForDomState(readMatchingRows, { timeout: 15000 });
+      searchResult = await waitForDomState(readMatchingRows, { timeout: 15000 });
+      if (searchResult?.empty) throw new Error("商品搜索结果中没有此商品 ID。");
+      matchingRows = searchResult?.matches || null;
     }
   }
   if (!matchingRows) throw new Error("商品搜索结果中没有此商品 ID。");
