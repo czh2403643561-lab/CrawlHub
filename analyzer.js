@@ -1159,29 +1159,57 @@ async function scanProductOpportunityBindingIndex(onProgress = null, scanControl
   return window.__crawlHubBindingSession;
 }
 
-function productOpportunityRowsSignature(detected, container) {
-  return productOpportunityRows(detected, container)
-    .slice(0, 12)
-    .map((row) => compactOpportunityText(row.innerText || row.textContent || ""))
-    .join(" | ");
+function productOpportunityListSnapshot(detected, container) {
+  const { keyword: keywordColumn } = productOpportunityColumnIndexes(detected);
+  const rows = productOpportunityRows(detected, container);
+  const keywords = rows.map((row) => {
+    const cells = Array.from(row.children).filter(isVisiblePageElement);
+    return compactOpportunityText(cells[keywordColumn]?.innerText || cells[keywordColumn]?.textContent || "");
+  }).filter(Boolean);
+  return {
+    scroll_top: container.scrollTop,
+    visible_row_count: rows.length,
+    visible_keywords_preview: keywords.slice(0, 5),
+    signature: `${rows.length}:${keywords.slice(0, 12).join(" | ")}`
+  };
 }
 
-async function findProductOpportunityRowNearScrollTop(detected, container, entry, scrollTop) {
+async function waitForProductOpportunityListSettled(detected, container, { timeout = 5000, interval = 250, beforeScrollSnapshot = null } = {}) {
+  const deadline = Date.now() + timeout;
+  let previous = null;
+  let stableSamples = 0;
+  let contentUpdated = !beforeScrollSnapshot;
+  let snapshot = productOpportunityListSnapshot(detected, container);
+  while (Date.now() < deadline) {
+    snapshot = productOpportunityListSnapshot(detected, container);
+    if (beforeScrollSnapshot && (snapshot.visible_row_count !== beforeScrollSnapshot.visible_row_count || snapshot.signature !== beforeScrollSnapshot.signature)) {
+      contentUpdated = true;
+    }
+    const unchanged = previous
+      && snapshot.scroll_top === previous.scroll_top
+      && snapshot.visible_row_count === previous.visible_row_count
+      && snapshot.signature === previous.signature;
+    stableSamples = unchanged ? stableSamples + 1 : 1;
+    if (contentUpdated && stableSamples >= 3) return { settled: true, snapshot, stable_samples: stableSamples };
+    previous = snapshot;
+    await waitForPageUpdate(interval);
+  }
+  return { settled: false, snapshot, stable_samples: stableSamples };
+}
+
+async function findProductOpportunityRowNearScrollTop(detected, container, entry, scrollTop, { retryWhenMissing = false } = {}) {
   const maximumScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
   const targetScrollTop = Math.max(0, Math.min(maximumScrollTop, scrollTop));
-  const beforeSignature = productOpportunityRowsSignature(detected, container);
   const beforeScrollTop = container.scrollTop;
+  const beforeScrollSnapshot = targetScrollTop !== beforeScrollTop ? productOpportunityListSnapshot(detected, container) : null;
   container.scrollTop = targetScrollTop;
-  const deadline = Date.now() + 1800;
-  while (Date.now() < deadline) {
-    const row = findProductOpportunityRowForEntry(detected, container, entry);
-    if (row) return row;
-    const domChanged = container.scrollTop !== beforeScrollTop
-      || productOpportunityRowsSignature(detected, container) !== beforeSignature;
-    if (domChanged) await waitForPageUpdate(120);
-    else await waitForPageUpdate(220);
+  let settled = await waitForProductOpportunityListSettled(detected, container, { beforeScrollSnapshot });
+  let row = findProductOpportunityRowForEntry(detected, container, entry);
+  if (!row && retryWhenMissing) {
+    settled = await waitForProductOpportunityListSettled(detected, container);
+    row = findProductOpportunityRowForEntry(detected, container, entry);
   }
-  return findProductOpportunityRowForEntry(detected, container, entry);
+  return { row, settled };
 }
 
 async function locateProductOpportunityKeyword(keyword) {
@@ -1213,8 +1241,9 @@ async function locateProductOpportunityKeyword(keyword) {
     if (row) addAutoReportDebugLog("locate_cached_hit", logDetails({ source: "visible_dom", attempt_scroll_top: container.scrollTop }));
   }
   if (!row) {
-    row = await findProductOpportunityRowNearScrollTop(detected, container, entry, cachedScrollTop);
-    if (row) addAutoReportDebugLog("locate_cached_hit", logDetails({ source: "cached_scroll_top", attempt_scroll_top: container.scrollTop }));
+    const cachedResult = await findProductOpportunityRowNearScrollTop(detected, container, entry, cachedScrollTop, { retryWhenMissing: true });
+    row = cachedResult.row;
+    if (row) addAutoReportDebugLog("locate_cached_hit", logDetails({ source: "cached_scroll_top", attempt_scroll_top: container.scrollTop, ...cachedResult.settled.snapshot }));
   }
   if (!row) {
     addAutoReportDebugLog("locate_cached_miss", logDetails());
@@ -1227,14 +1256,24 @@ async function locateProductOpportunityKeyword(keyword) {
       cachedScrollTop + viewport
     ].map((value) => Math.max(0, Math.min(maximumScrollTop, value)));
     const attemptedScrollTops = new Set([Math.round(Math.max(0, Math.min(maximumScrollTop, cachedScrollTop)))]);
+    let attemptIndex = 0;
     for (const attemptScrollTop of fallbackScrollTops) {
       const roundedScrollTop = Math.round(attemptScrollTop);
       if (attemptedScrollTops.has(roundedScrollTop)) continue;
       attemptedScrollTops.add(roundedScrollTop);
-      addAutoReportDebugLog("locate_fallback_attempt", logDetails({ attempt_scroll_top: attemptScrollTop }));
-      row = await findProductOpportunityRowNearScrollTop(detected, container, entry, attemptScrollTop);
+      attemptIndex += 1;
+      const fallbackResult = await findProductOpportunityRowNearScrollTop(detected, container, entry, attemptScrollTop);
+      row = fallbackResult.row;
+      const attemptDetails = logDetails({
+        attempt_index: attemptIndex,
+        attempt_scroll_top: attemptScrollTop,
+        visible_row_count: fallbackResult.settled.snapshot.visible_row_count,
+        visible_keywords_preview: fallbackResult.settled.snapshot.visible_keywords_preview,
+        found: Boolean(row)
+      });
+      addAutoReportDebugLog("locate_fallback_attempt", attemptDetails);
       if (row) {
-        addAutoReportDebugLog("locate_fallback_found", logDetails({ attempt_scroll_top: container.scrollTop }));
+        addAutoReportDebugLog("locate_fallback_found", attemptDetails);
         break;
       }
     }
@@ -1362,6 +1401,10 @@ const BATCH_DEBUG_EVENT_NAMES = {
   search_result_changed: "search_result_changed",
   product_found: "product_found",
   target_product_found: "target_product_found",
+  target_row_settle_start: "target_row_settle_start",
+  target_row_settle_sample: "target_row_settle_sample",
+  target_row_settled: "target_row_settled",
+  target_row_settle_timeout: "target_row_settle_timeout",
   already_bound_first_check: "already_bound_first_check",
   checkbox_found: "checkbox_found",
   checkbox_disabled: "checkbox_disabled",
@@ -1383,6 +1426,31 @@ const BATCH_DEBUG_EVENT_NAMES = {
   batch_item_failed: "batch_item_failed",
   error: "error"
 };
+
+const BATCH_BUSINESS_STEPS = new Set([
+  "locate_keyword_start",
+  "locate_cached_hit",
+  "locate_cached_miss",
+  "locate_fallback_attempt",
+  "locate_fallback_found",
+  "locate_fallback_failed",
+  "binding_opened",
+  "step_one_ready",
+  "product_id_written",
+  "search_clicked",
+  "search_result_changed",
+  "target_product_found",
+  "target_row_settled",
+  "target_row_settle_timeout",
+  "product_already_bound",
+  "checkbox_disabled",
+  "checkbox_click_failed",
+  "already_bound_recheck_timeout",
+  "checkbox_clicked",
+  "next_clicked",
+  "submit_clicked",
+  "success_toast_detected"
+]);
 
 function resetBatchDebugLog(total) {
   window.__crawlHubBatchDebugLog = {
@@ -1417,6 +1485,8 @@ function getBatchDebugItem() {
       final_status: null,
       error: "",
       last_step: "",
+      last_business_step: "",
+      last_event: "",
       events: []
     };
     log.items.push(item);
@@ -1427,7 +1497,11 @@ function getBatchDebugItem() {
 function addBatchDebugEvent(step, details = {}) {
   const item = getBatchDebugItem();
   if (!item) return;
-  item.last_step = step;
+  item.last_event = step;
+  if (BATCH_BUSINESS_STEPS.has(step)) {
+    item.last_business_step = step;
+    item.last_step = step;
+  }
   item.events.push({ at: new Date().toISOString(), step, ...batchDebugSafeDetails(details) });
 }
 
@@ -1488,6 +1562,62 @@ function getAutoReportProductResultsSnapshot(drawerRoot) {
 
 function didAutoReportProductResultsChange(before, after) {
   return Boolean(before && after && (before.visible_row_count !== after.visible_row_count || before.signature !== after.signature));
+}
+
+function findVisibleTargetProductRows(drawerRoot, productId) {
+  return Array.from(drawerRoot?.querySelectorAll("tr") || [])
+    .filter(isVisiblePageElement)
+    .filter((row) => rowContainsCompleteProductId(row, productId));
+}
+
+function hasVisibleAutoReportLoading(drawerRoot) {
+  return Array.from(drawerRoot?.querySelectorAll("[aria-busy='true'], [role='progressbar']") || [])
+    .some(isVisiblePageElement);
+}
+
+async function waitForTargetProductRowSettled(drawerRoot, productId, { timeout = 30000, interval = 250 } = {}) {
+  addAutoReportDebugLog("target_row_settle_start", { product_id: productId });
+  const deadline = Date.now() + timeout;
+  let previousRow = null;
+  let previousSignature = "";
+  let stableSamples = 0;
+  while (Date.now() < deadline) {
+    const rows = findVisibleTargetProductRows(drawerRoot, productId);
+    const row = rows.length === 1 ? rows[0] : null;
+    const signature = row ? compactOpportunityText(row.innerText || row.textContent || "") : "";
+    const loadingDetected = hasVisibleAutoReportLoading(drawerRoot);
+    const unchanged = Boolean(row)
+      && !loadingDetected
+      && row === previousRow
+      && signature === previousSignature;
+    stableSamples = unchanged ? stableSamples + 1 : row && !loadingDetected ? 1 : 0;
+    addAutoReportDebugLog("target_row_settle_sample", {
+      product_id: productId,
+      signature,
+      sample_count: stableSamples,
+      loading_detected: loadingDetected,
+      match_count: rows.length
+    });
+    if (row && !loadingDetected && stableSamples >= 3) {
+      addAutoReportDebugLog("target_row_settled", {
+        product_id: productId,
+        signature,
+        sample_count: stableSamples,
+        loading_detected: loadingDetected
+      });
+      return row;
+    }
+    previousRow = row;
+    previousSignature = signature;
+    await waitForPageUpdate(interval);
+  }
+  addAutoReportDebugLog("target_row_settle_timeout", {
+    product_id: productId,
+    signature: previousSignature,
+    sample_count: stableSamples,
+    loading_detected: hasVisibleAutoReportLoading(drawerRoot)
+  });
+  return null;
 }
 
 function findSearchControlForInput(searchInput) {
@@ -1935,6 +2065,8 @@ async function runSingleProductAutoReport(keyword, productId, onStatus = null, {
 
   let targetRow = matchingRows[0];
   addAutoReportDebugLog("target_product_found", { product_id: productId });
+  targetRow = await waitForTargetProductRowSettled(readyDrawer.drawer_root, productId, { timeout: 30000 });
+  if (!targetRow) throw new Error("商品搜索结果尚未稳定，请重试。");
   const findCurrentTargetRow = () => {
     const currentInput = document.getElementById("search_content_input");
     const stepOneRoot = currentInput && isVisiblePageElement(currentInput) ? findAutoReportStepOneRoot(currentInput) : null;
