@@ -960,6 +960,21 @@ function bindingSkillDataSource(snapshot) {
   };
 }
 
+function resetSkillSyncLog() {
+  window.__crawlHubSkillSyncLog = [];
+}
+
+if (!Array.isArray(window.__crawlHubSkillSyncLog)) window.__crawlHubSkillSyncLog = [];
+
+function addSkillSyncLog(step, details = {}) {
+  if (!Array.isArray(window.__crawlHubSkillSyncLog)) window.__crawlHubSkillSyncLog = [];
+  window.__crawlHubSkillSyncLog.push({
+    timestamp: new Date().toISOString(),
+    step,
+    details
+  });
+}
+
 async function readSkillDataProjectRootHandle() {
   return readExportRootDirectory();
 }
@@ -998,28 +1013,46 @@ async function validateSkillDataProjectRoot(handle) {
   return handle;
 }
 
-async function syncProductOpportunitySkillData(directoryHandle, snapshot) {
-  if (!snapshot) throw new Error("尚未生成商品机会关键词库。");
-  const payload = bindingSkillDataSource(snapshot);
-  if (payload.count !== payload.records.length || payload.count <= 0) {
-    throw new Error("当前关键词快照为空，未写入 Skill 数据源。");
-  }
-  console.debug("[CrawlHub][Skill Sync] snapshot_ready", { count: payload.count });
-  const permission = await skillDataProjectRootPermission(directoryHandle);
-  console.debug("[CrawlHub][Skill Sync] permission", permission);
-  if (permission !== "granted") throw new Error("项目目录写入权限已失效");
-  console.debug("[CrawlHub][Skill Sync] write_start");
+async function syncProductOpportunitySkillData(directoryHandle, snapshot, { loadedCount = null } = {}) {
+  let failedStep = "snapshot_ready";
   try {
+    if (!snapshot) throw new Error("尚未生成商品机会关键词库。");
+    const payload = bindingSkillDataSource(snapshot);
+    if (payload.count !== payload.records.length || payload.count <= 0) {
+      throw new Error("当前关键词快照为空，未写入 Skill 数据源。");
+    }
+    console.debug("[CrawlHub][Skill Sync] snapshot_ready", { count: payload.count });
+    addSkillSyncLog("snapshot_ready", { loaded_count: loadedCount, snapshot_count: payload.count });
+    failedStep = "project_directory";
+    addSkillSyncLog("project_directory", {
+      directory_name: directoryHandle?.name || "",
+      target_file: "data/product_opportunity_keywords.json"
+    });
+    failedStep = "permission_checked";
+    const permission = await skillDataProjectRootPermission(directoryHandle);
+    console.debug("[CrawlHub][Skill Sync] permission", permission);
+    addSkillSyncLog("permission_checked", { permission });
+    if (permission !== "granted") throw new Error("项目目录写入权限已失效");
+    failedStep = "write_start";
+    console.debug("[CrawlHub][Skill Sync] write_start");
+    addSkillSyncLog("write_start");
     const dataDirectory = await directoryHandle.getDirectoryHandle("data", { create: true });
     const fileHandle = await dataDirectory.getFileHandle("product_opportunity_keywords.json", { create: true });
     const writable = await fileHandle.createWritable();
     await writable.write(JSON.stringify(payload, null, 2));
     await writable.close();
     console.debug("[CrawlHub][Skill Sync] write_complete");
+    addSkillSyncLog("write_complete");
+    failedStep = "verify_complete";
     const file = await fileHandle.getFile();
     const verified = JSON.parse(await file.text());
     const actualCount = Array.isArray(verified.records) ? verified.records.length : 0;
     console.debug("[CrawlHub][Skill Sync] verify_complete", { expected_count: payload.count, actual_count: actualCount });
+    addSkillSyncLog("verify_complete", {
+      expected_count: payload.count,
+      actual_count: actualCount,
+      schema_version: verified.schema_version
+    });
     if (verified.schema_version !== "1.0"
       || verified.count !== payload.count
       || !Array.isArray(verified.records)
@@ -1027,11 +1060,14 @@ async function syncProductOpportunitySkillData(directoryHandle, snapshot) {
       || verified.count <= 0) {
       throw new Error(`Skill 数据源写入后校验失败。写入后读取到 ${actualCount} 条，预期 ${payload.count} 条`);
     }
+    addSkillSyncLog("sync_success", { count: payload.count });
     return { payload, verified };
   } catch (error) {
+    const message = error?.message || "无法写入或读取数据文件";
+    addSkillSyncLog("sync_failed", { failed_step: failedStep, error: message });
     console.error("[CrawlHub][Skill Sync] failed", error);
-    if (error?.message?.startsWith("Skill 数据源写入后校验失败")) throw error;
-    throw new Error(`数据文件写入失败：${error?.message || "无法写入或读取数据文件"}`);
+    if (message.startsWith("Skill 数据源写入后校验失败")) throw error;
+    throw new Error(`数据文件写入失败：${message}`);
   }
 }
 
@@ -4025,6 +4061,7 @@ function installPanel() {
             <div id="bindingLoaded" class="binding-count" style="white-space: pre-line;" hidden>已加载：0</div>
             <div class="actions" style="margin-top: 9px;"><button id="scanBinding" type="button">扫描商品机会</button><button id="connectBindingSkillData" class="secondary" type="button">关联项目目录</button><button id="reconnectBindingSkillData" class="secondary" type="button" hidden>重新关联目录</button><button id="exportBindingSkillData" class="secondary" type="button" hidden>下载 Skill 数据源</button></div>
             <div id="bindingSkillDataState" class="binding-status" style="white-space: pre-line;">Skill 数据源：正在检查目录关联…</div>
+            <div class="actions" style="margin-top: 5px;"><button id="exportSkillSyncLog" class="secondary" type="button" disabled>导出同步日志</button></div>
             <div class="actions" style="margin-top: 7px;"><button id="pause_scan_task" class="secondary" type="button" hidden>暂停扫描</button></div>
             <div id="bindingSearch" class="binding-search" hidden>
               <input id="bindingKeyword" class="binding-input" type="text" autocomplete="off" placeholder="请输入完整关键词" />
@@ -4072,6 +4109,7 @@ function installPanel() {
   const connectBindingSkillDataButton = shadow.querySelector("#connectBindingSkillData");
   const reconnectBindingSkillDataButton = shadow.querySelector("#reconnectBindingSkillData");
   const exportBindingSkillDataButton = shadow.querySelector("#exportBindingSkillData");
+  const exportSkillSyncLogButton = shadow.querySelector("#exportSkillSyncLog");
   const pauseScanTaskButton = shadow.querySelector("#pause_scan_task");
   const bindingScanState = shadow.querySelector("#bindingScanState");
   const bindingLoaded = shadow.querySelector("#bindingLoaded");
@@ -4392,6 +4430,7 @@ function installPanel() {
     reconnectBindingSkillDataButton.disabled = skillDataDirectoryBusy;
     exportBindingSkillDataButton.hidden = !hasSnapshot || !["unsupported", "permission_denied"].includes(skillDataProjectRootState);
     exportBindingSkillDataButton.disabled = !hasSnapshot || batchReportBusy;
+    exportSkillSyncLogButton.disabled = !Array.isArray(window.__crawlHubSkillSyncLog) || window.__crawlHubSkillSyncLog.length === 0;
     if (!directorySyncSupported || skillDataProjectRootState === "unsupported") {
       bindingSkillDataState.textContent = "当前浏览器不支持直接同步，可使用文件导出方式。";
       return;
@@ -4618,6 +4657,24 @@ function installPanel() {
     skillDataSyncNotice = "最新 Skill 数据源已导出。";
     renderBinding();
   };
+  const downloadSkillSyncLog = () => {
+    const events = Array.isArray(window.__crawlHubSkillSyncLog) ? window.__crawlHubSkillSyncLog : [];
+    if (!events.length) return;
+    const projectEvent = events.find((event) => event.step === "project_directory");
+    const payload = {
+      generated_at: new Date().toISOString(),
+      directory_name: projectEvent?.details?.directory_name || skillDataProjectRootHandle?.name || "",
+      target_file: "data/product_opportunity_keywords.json",
+      events
+    };
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const blobUrl = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+    const anchor = document.createElement("a");
+    anchor.href = blobUrl;
+    anchor.download = `crawlHub-skill-sync-${timestamp}.json`;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+  };
   const establishSkillDataConnection = async (handle, successNotice) => {
     setSkillDataConnectionPhase("permission_request");
     const permission = await skillDataProjectRootPermission(handle, { request: true });
@@ -4625,8 +4682,9 @@ function installPanel() {
     setSkillDataConnectionPhase("permission_granted");
     const snapshot = window.__crawlHubBindingSession?.keyword_database?.current_snapshot;
     if (snapshot) {
+      addSkillSyncLog("sync_start");
       setSkillDataConnectionPhase("test_write");
-      await syncProductOpportunitySkillData(handle, snapshot);
+      await syncProductOpportunitySkillData(handle, snapshot, { loadedCount: window.__crawlHubBindingSession?.loaded_count ?? null });
       setSkillDataConnectionPhase("test_write_success");
       skillDataSyncNotice = successNotice;
     } else {
@@ -4637,11 +4695,15 @@ function installPanel() {
   const syncCurrentProductOpportunitySkillData = async () => {
     const session = window.__crawlHubBindingSession;
     const snapshot = window.__crawlHubBindingSession?.keyword_database?.current_snapshot;
+    let failedStep = "sync_start";
+    addSkillSyncLog("sync_start");
     const fail = (message) => {
+      addSkillSyncLog("sync_failed", { failed_step: failedStep, error: message });
       skillDataSyncNotice = message;
       renderBinding();
       throw new Error(message);
     };
+    failedStep = "snapshot_ready";
     if (!snapshot) fail("当前扫描没有生成关键词快照。");
     if (!Array.isArray(snapshot.records) || snapshot.records.length === 0) fail("当前关键词快照为空，未写入 Skill 数据源。");
     console.debug("[CrawlHub][Skill Sync] snapshot_ready", { count: snapshot.records.length });
@@ -4652,17 +4714,20 @@ function installPanel() {
       });
       skillDataSyncNotice = `扫描完成：${session?.loaded_count || 0} 条；关键词快照：${snapshot.records.length} 条`;
     }
+    failedStep = "project_directory";
     if (!skillDataProjectRootHandle) fail("项目目录句柄不存在，请重新关联目录。");
+    failedStep = "permission_checked";
     if (skillDataProjectRootState !== "connected") fail("项目目录当前未处于已连接状态。");
     try {
       const permission = await skillDataProjectRootPermission(skillDataProjectRootHandle);
       console.debug("[CrawlHub][Skill Sync] permission", permission);
       if (permission !== "granted") {
+        addSkillSyncLog("permission_checked", { permission });
         skillDataProjectRootState = "permission_required";
         throw new Error("扫描完成，但 Skill 数据源写入权限已失效，请点击重新授权。");
       }
       setSkillDataConnectionPhase("test_write");
-      const result = await syncProductOpportunitySkillData(skillDataProjectRootHandle, snapshot);
+      const result = await syncProductOpportunitySkillData(skillDataProjectRootHandle, snapshot, { loadedCount: session?.loaded_count ?? null });
       setSkillDataConnectionPhase("test_write_success");
       const countNotice = session?.loaded_count !== result.payload.count
         ? `扫描完成：${session?.loaded_count || 0} 条；`
@@ -4672,6 +4737,10 @@ function installPanel() {
     } catch (error) {
       console.error("[CrawlHub] skill data sync failed", error);
       if (error?.message?.includes("写入权限已失效")) skillDataProjectRootState = "permission_required";
+      const lastSkillSyncEvent = window.__crawlHubSkillSyncLog?.[window.__crawlHubSkillSyncLog.length - 1];
+      if (lastSkillSyncEvent?.step !== "sync_failed") {
+        addSkillSyncLog("sync_failed", { failed_step: failedStep, error: error?.message || "未知写入错误" });
+      }
       skillDataSyncNotice = `扫描完成：${snapshot.records.length} 条\nSkill 数据源同步失败：${error?.message || "未知写入错误"}`;
       throw error;
     } finally {
@@ -4969,6 +5038,7 @@ function installPanel() {
   bindingScanButton.addEventListener("click", async () => {
     if (bindingScanBusy) return;
     bindingScanBusy = true;
+    resetSkillSyncLog();
     const scanControl = { active: true, paused: false, cancelled: false };
     const previousSnapshot = window.__crawlHubBindingSession?.keyword_database?.current_snapshot || null;
     window.__crawlHubBindingScanControl = scanControl;
@@ -4993,11 +5063,15 @@ function installPanel() {
       const snapshot = session?.keyword_database?.current_snapshot;
       if (session?.state !== "completed" || !snapshot) {
         const error = new Error("当前扫描没有生成关键词快照。");
+        addSkillSyncLog("sync_start");
+        addSkillSyncLog("sync_failed", { failed_step: "snapshot_ready", error: error.message });
         skillDataSyncNotice = error.message;
         console.error("[CrawlHub][Skill Sync] snapshot validation failed", error);
         renderBinding();
       } else if (!Array.isArray(snapshot.records) || snapshot.records.length === 0) {
         const error = new Error("当前关键词快照为空，未写入 Skill 数据源。");
+        addSkillSyncLog("sync_start");
+        addSkillSyncLog("sync_failed", { failed_step: "snapshot_ready", error: error.message });
         skillDataSyncNotice = error.message;
         console.error("[CrawlHub][Skill Sync] snapshot validation failed", error);
         renderBinding();
@@ -5086,6 +5160,7 @@ function installPanel() {
   });
   reconnectBindingSkillDataButton.addEventListener("click", connectSkillDataProjectRoot);
   exportBindingSkillDataButton.addEventListener("click", downloadBindingSkillData);
+  exportSkillSyncLogButton.addEventListener("click", downloadSkillSyncLog);
   exportBatchDebugButton.addEventListener("click", downloadBatchDebugLog);
   downloadBatchTemplateButton.addEventListener("click", async () => {
     batchImportNotice = "正在下载导入模板...";

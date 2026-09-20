@@ -47,6 +47,7 @@
 - 商品绑定调试缓存的五项读写操作已由 content.js 直接使用 `chrome.storage.local`，错误状态会显示真实错误并输出开发日志。
 - 商品绑定扫描缓存现保留当前快照、上一版快照和最近一次差异；以“标准化关键词 + 类目”比较新增、移除及线索来源/搜索次数/在售商品变化，定位字段继续只用于页面定位。
 - 商品绑定面板会显示关键词库数量、与上一版的变化摘要和更新时间；首次可关联 CrawlHub 项目根目录，目录句柄复用默认导出目录的 IndexedDB structured-clone 保存机制。关联过程会显示 manifest/data/保存/权限/测试写入阶段及真实错误；扫描完成后会校验 snapshot 数量、重新查询写入权限，并对固定 `data/product_opportunity_keywords.json` 执行写入后回读验证，成功显示实际同步数量；浏览器不支持或目录授权被拒绝时保留 Blob 下载兜底。项目内同路径文件保持稳定 JSON 结构，供后续标题 Skill 读取。
+- Skill 数据源同步新增当前浏览器会话内的专用事件日志 `window.__crawlHubSkillSyncLog`，商品绑定面板可导出 `crawlHub-skill-sync-时间.json`；日志只包含同步阶段、数量、目录名和固定目标文件，不写入仓库。
 
 ## 问题
 
