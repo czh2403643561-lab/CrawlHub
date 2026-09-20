@@ -960,6 +960,82 @@ function bindingSkillDataSource(snapshot) {
   };
 }
 
+const skillDataHandleDatabase = "crawlHubFileHandles";
+const skillDataHandleStore = "handles";
+const skillDataProjectRootKey = "skillDataProjectRoot";
+
+function openSkillDataHandleDatabase() {
+  if (!window.indexedDB) throw new Error("当前浏览器不支持保存项目目录授权。");
+  return new Promise((resolve, reject) => {
+    const request = window.indexedDB.open(skillDataHandleDatabase, 1);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(skillDataHandleStore)) request.result.createObjectStore(skillDataHandleStore, { keyPath: "key" });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("项目目录授权无法保存。"));
+  });
+}
+
+async function readSkillDataProjectRootHandle() {
+  const database = await openSkillDataHandleDatabase();
+  return new Promise((resolve, reject) => {
+    const request = database.transaction(skillDataHandleStore, "readonly").objectStore(skillDataHandleStore).get(skillDataProjectRootKey);
+    request.onsuccess = () => {
+      database.close();
+      resolve(request.result?.handle || null);
+    };
+    request.onerror = () => {
+      database.close();
+      reject(request.error || new Error("项目目录授权无法读取。"));
+    };
+  });
+}
+
+async function saveSkillDataProjectRootHandle(handle) {
+  const database = await openSkillDataHandleDatabase();
+  return new Promise((resolve, reject) => {
+    const request = database.transaction(skillDataHandleStore, "readwrite").objectStore(skillDataHandleStore).put({ key: skillDataProjectRootKey, handle });
+    request.onsuccess = () => {
+      database.close();
+      resolve();
+    };
+    request.onerror = () => {
+      database.close();
+      reject(request.error || new Error("项目目录授权无法保存。"));
+    };
+  });
+}
+
+async function skillDataProjectRootPermission(handle, { request = false } = {}) {
+  if (!handle) return "denied";
+  if (typeof handle.queryPermission !== "function") return "granted";
+  let permission = await handle.queryPermission({ mode: "readwrite" });
+  if (permission === "prompt" && request && typeof handle.requestPermission === "function") {
+    permission = await handle.requestPermission({ mode: "readwrite" });
+  }
+  return permission;
+}
+
+async function validateSkillDataProjectRoot(handle) {
+  if (!handle || handle.kind !== "directory") throw new Error("请选择 CrawlHub 项目根目录。");
+  await handle.getFileHandle("manifest.json", { create: false });
+  await handle.getDirectoryHandle("data", { create: true });
+  return handle;
+}
+
+async function syncProductOpportunitySkillData(directoryHandle, snapshot) {
+  if (!snapshot) throw new Error("尚未生成商品机会关键词库。");
+  if (await skillDataProjectRootPermission(directoryHandle) !== "granted") throw new Error("Skill 数据源需要重新授权。");
+  const dataDirectory = await directoryHandle.getDirectoryHandle("data", { create: true });
+  const fileHandle = await dataDirectory.getFileHandle("product_opportunity_keywords.json", { create: true });
+  const writable = await fileHandle.createWritable();
+  try {
+    await writable.write(JSON.stringify(bindingSkillDataSource(snapshot), null, 2));
+  } finally {
+    await writable.close();
+  }
+}
+
 function bindingCachePayload(session, identity, previousCache = null) {
   const previousSnapshot = previousCache?.current_snapshot || null;
   const currentSnapshot = createBindingKeywordSnapshot(session.entries, session.scanned_at);
@@ -3948,8 +4024,8 @@ function installPanel() {
             <div id="bindingCacheUpdate" class="binding-status binding-cache-update" hidden></div>
             <div id="bindingScanState" class="binding-status">尚未扫描</div>
             <div id="bindingLoaded" class="binding-count" style="white-space: pre-line;" hidden>已加载：0</div>
-            <div class="actions" style="margin-top: 9px;"><button id="scanBinding" type="button">扫描商品机会</button><button id="exportBindingSkillData" class="secondary" type="button" hidden>导出 Skill 数据源</button></div>
-            <div id="bindingSkillDataState" class="binding-status"></div>
+            <div class="actions" style="margin-top: 9px;"><button id="scanBinding" type="button">扫描商品机会</button><button id="connectBindingSkillData" class="secondary" type="button">关联项目目录</button><button id="reconnectBindingSkillData" class="secondary" type="button" hidden>重新关联目录</button><button id="exportBindingSkillData" class="secondary" type="button" hidden>下载 Skill 数据源</button></div>
+            <div id="bindingSkillDataState" class="binding-status" style="white-space: pre-line;">Skill 数据源：正在检查目录关联…</div>
             <div class="actions" style="margin-top: 7px;"><button id="pause_scan_task" class="secondary" type="button" hidden>暂停扫描</button></div>
             <div id="bindingSearch" class="binding-search" hidden>
               <input id="bindingKeyword" class="binding-input" type="text" autocomplete="off" placeholder="请输入完整关键词" />
@@ -3994,6 +4070,8 @@ function installPanel() {
   const bindingDebugState = shadow.querySelector("#bindingDebugState");
   const bindingKeywordInput = shadow.querySelector("#bindingKeyword");
   const bindingScanButton = shadow.querySelector("#scanBinding");
+  const connectBindingSkillDataButton = shadow.querySelector("#connectBindingSkillData");
+  const reconnectBindingSkillDataButton = shadow.querySelector("#reconnectBindingSkillData");
   const exportBindingSkillDataButton = shadow.querySelector("#exportBindingSkillData");
   const pauseScanTaskButton = shadow.querySelector("#pause_scan_task");
   const bindingScanState = shadow.querySelector("#bindingScanState");
@@ -4064,6 +4142,10 @@ function installPanel() {
   let bindingDebugIdentity = null;
   let bindingHasDebugCache = false;
   let bindingDebugNotice = "";
+  let skillDataProjectRootHandle = null;
+  let skillDataProjectRootState = "checking";
+  let skillDataSyncNotice = "";
+  let skillDataDirectoryBusy = false;
   let previousCollectionPageType = null;
   const header = shadow.querySelector("header");
   const dragState = { active: false, offsetX: 0, offsetY: 0, htmlUserSelect: "", bodyUserSelect: "" };
@@ -4301,6 +4383,37 @@ function installPanel() {
       batchReportState.textContent = `批量已暂停\n已完成 ${completed} 条 · 成功 ${success} · 跳过 ${skipped} · 失败 ${failed}\n${batchReportSession.error || "请确认页面后重新导入任务。"}`;
     }
   };
+  const renderBindingSkillDataState = (hasSnapshot) => {
+    const directorySyncSupported = typeof window.showDirectoryPicker === "function" && Boolean(window.indexedDB);
+    connectBindingSkillDataButton.hidden = !directorySyncSupported || !["unlinked", "permission_required", "permission_denied"].includes(skillDataProjectRootState);
+    connectBindingSkillDataButton.textContent = skillDataProjectRootState === "unlinked" ? "关联项目目录" : "重新授权";
+    connectBindingSkillDataButton.disabled = skillDataDirectoryBusy;
+    reconnectBindingSkillDataButton.hidden = !directorySyncSupported || skillDataProjectRootState !== "connected";
+    reconnectBindingSkillDataButton.disabled = skillDataDirectoryBusy;
+    exportBindingSkillDataButton.hidden = !hasSnapshot || !["unsupported", "permission_denied"].includes(skillDataProjectRootState);
+    exportBindingSkillDataButton.disabled = !hasSnapshot || batchReportBusy;
+    if (!directorySyncSupported || skillDataProjectRootState === "unsupported") {
+      bindingSkillDataState.textContent = "当前浏览器不支持直接同步，可使用文件导出方式。";
+      return;
+    }
+    if (skillDataProjectRootState === "checking") {
+      bindingSkillDataState.textContent = "Skill 数据源：正在检查目录关联…";
+      return;
+    }
+    if (skillDataProjectRootState === "unlinked") {
+      bindingSkillDataState.textContent = "Skill 数据源：尚未关联项目目录";
+      return;
+    }
+    if (skillDataProjectRootState === "permission_required") {
+      bindingSkillDataState.textContent = "Skill 数据源需要重新授权";
+      return;
+    }
+    if (skillDataProjectRootState === "permission_denied") {
+      bindingSkillDataState.textContent = "Skill 数据源需要重新授权，可使用文件导出方式。";
+      return;
+    }
+    bindingSkillDataState.textContent = `Skill 数据源：已连接\ndata/product_opportunity_keywords.json${skillDataSyncNotice ? `\n${skillDataSyncNotice}` : ""}`;
+  };
   const renderBinding = () => {
     const session = window.__crawlHubBindingSession;
     const scanControl = window.__crawlHubBindingScanControl;
@@ -4312,8 +4425,7 @@ function installPanel() {
     bindingDebugState.textContent = bindingDebugNotice;
     bindingScanButton.disabled = bindingScanBusy || batchReportBusy;
     bindingScanButton.textContent = bindingHasDebugCache || hasSnapshot ? "重新扫描并更新缓存" : "扫描商品机会";
-    exportBindingSkillDataButton.hidden = !hasSnapshot || session?.state !== "completed";
-    exportBindingSkillDataButton.disabled = !hasSnapshot || batchReportBusy;
+    renderBindingSkillDataState(hasSnapshot && session?.state === "completed");
     bindingLocateButton.disabled = bindingLocateBusy || batchReportBusy;
     startAutoReportButton.disabled = autoReportBusy || batchReportBusy;
     renderBatchReport();
@@ -4478,7 +4590,8 @@ function installPanel() {
   const downloadBindingSkillData = () => {
     const snapshot = window.__crawlHubBindingSession?.keyword_database?.current_snapshot;
     if (!snapshot) {
-      bindingSkillDataState.textContent = "请先完成商品机会扫描。";
+      skillDataSyncNotice = "请先完成商品机会扫描。";
+      renderBinding();
       return;
     }
     const blobUrl = URL.createObjectURL(new Blob([JSON.stringify(bindingSkillDataSource(snapshot), null, 2)], { type: "application/json" }));
@@ -4487,7 +4600,101 @@ function installPanel() {
     anchor.download = "product_opportunity_keywords.json";
     anchor.click();
     setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
-    bindingSkillDataState.textContent = "最新 Skill 数据源已导出。";
+    skillDataSyncNotice = "最新 Skill 数据源已导出。";
+    renderBinding();
+  };
+  const syncCurrentProductOpportunitySkillData = async () => {
+    const snapshot = window.__crawlHubBindingSession?.keyword_database?.current_snapshot;
+    if (!snapshot || skillDataProjectRootState !== "connected" || !skillDataProjectRootHandle) return false;
+    try {
+      await syncProductOpportunitySkillData(skillDataProjectRootHandle, snapshot);
+      skillDataSyncNotice = "Skill 数据源已同步";
+      return true;
+    } catch (error) {
+      console.error("[CrawlHub] skill data sync failed", error);
+      const permission = await skillDataProjectRootPermission(skillDataProjectRootHandle).catch(() => "denied");
+      skillDataProjectRootState = permission === "prompt" ? "permission_required" : "permission_denied";
+      skillDataSyncNotice = error?.message || "Skill 数据源同步失败。";
+      return false;
+    } finally {
+      renderBinding();
+    }
+  };
+  const restoreSkillDataProjectRoot = async () => {
+    if (typeof window.showDirectoryPicker !== "function" || !window.indexedDB) {
+      skillDataProjectRootState = "unsupported";
+      renderBinding();
+      return;
+    }
+    try {
+      const handle = await readSkillDataProjectRootHandle();
+      if (!handle) {
+        skillDataProjectRootState = "unlinked";
+        return;
+      }
+      skillDataProjectRootHandle = handle;
+      const permission = await skillDataProjectRootPermission(handle);
+      skillDataProjectRootState = permission === "granted" ? "connected" : "permission_required";
+    } catch (error) {
+      console.error("[CrawlHub] skill data directory restore failed", error);
+      skillDataProjectRootState = "unlinked";
+      skillDataSyncNotice = "项目目录关联暂不可用，请重新关联。";
+    } finally {
+      renderBinding();
+    }
+  };
+  const connectSkillDataProjectRoot = async () => {
+    if (skillDataDirectoryBusy) return;
+    if (typeof window.showDirectoryPicker !== "function" || !window.indexedDB) {
+      skillDataProjectRootState = "unsupported";
+      renderBinding();
+      return;
+    }
+    skillDataDirectoryBusy = true;
+    skillDataSyncNotice = "";
+    renderBinding();
+    try {
+      const handle = await window.showDirectoryPicker({ mode: "readwrite" });
+      await validateSkillDataProjectRoot(handle);
+      await saveSkillDataProjectRootHandle(handle);
+      skillDataProjectRootHandle = handle;
+      const permission = await skillDataProjectRootPermission(handle, { request: true });
+      skillDataProjectRootState = permission === "granted" ? "connected" : "permission_denied";
+      if (skillDataProjectRootState === "connected") await syncCurrentProductOpportunitySkillData();
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        skillDataSyncNotice = "已取消关联项目目录。";
+      } else {
+        console.error("[CrawlHub] skill data directory connect failed", error);
+        skillDataProjectRootState = "unlinked";
+        skillDataSyncNotice = error?.message || "关联项目目录失败。";
+      }
+    } finally {
+      skillDataDirectoryBusy = false;
+      renderBinding();
+    }
+  };
+  const reauthorizeSkillDataProjectRoot = async () => {
+    if (!skillDataProjectRootHandle) {
+      await connectSkillDataProjectRoot();
+      return;
+    }
+    if (skillDataDirectoryBusy) return;
+    skillDataDirectoryBusy = true;
+    skillDataSyncNotice = "";
+    renderBinding();
+    try {
+      const permission = await skillDataProjectRootPermission(skillDataProjectRootHandle, { request: true });
+      skillDataProjectRootState = permission === "granted" ? "connected" : "permission_denied";
+      if (skillDataProjectRootState === "connected") await syncCurrentProductOpportunitySkillData();
+    } catch (error) {
+      console.error("[CrawlHub] skill data directory reauthorization failed", error);
+      skillDataProjectRootState = "permission_denied";
+      skillDataSyncNotice = error?.message || "Skill 数据源重新授权失败。";
+    } finally {
+      skillDataDirectoryBusy = false;
+      renderBinding();
+    }
   };
   const downloadBatchReportResults = () => {
     if (!batchReportSession.tasks.length) return;
@@ -4715,6 +4922,7 @@ function installPanel() {
           console.error("[CrawlHub] binding debug cache save failed", error);
         }
       }
+      await syncCurrentProductOpportunitySkillData();
     } catch (error) {
       window.__crawlHubBindingSession = { state: "error", source: "scan", entries: [], loaded_count: 0, error: error.message || "暂时无法扫描商品机会。" };
     } finally {
@@ -4787,6 +4995,11 @@ function installPanel() {
     }
   });
   exportAutoReportDebugButton.addEventListener("click", downloadAutoReportDebugLog);
+  connectBindingSkillDataButton.addEventListener("click", () => {
+    if (skillDataProjectRootState === "unlinked") void connectSkillDataProjectRoot();
+    else void reauthorizeSkillDataProjectRoot();
+  });
+  reconnectBindingSkillDataButton.addEventListener("click", connectSkillDataProjectRoot);
   exportBindingSkillDataButton.addEventListener("click", downloadBindingSkillData);
   exportBatchDebugButton.addEventListener("click", downloadBatchDebugLog);
   downloadBatchTemplateButton.addEventListener("click", async () => {
@@ -5052,6 +5265,7 @@ function installPanel() {
   });
   setMode(window.__crawlHubMode || "analysis");
   void restoreBindingDebugCache();
+  void restoreSkillDataProjectRoot();
   void checkDetectedTaskChange();
   return { started: true, already_open: false };
 }
