@@ -46,7 +46,7 @@
 - 商品绑定新增“调试模式（使用扫描缓存）”：开关和索引通过扩展 `chrome.storage.local` 按站点、`shop_region`、店铺标识保存；缓存恢复为 `source: "cache"` 会话并重新定位 DOM，关闭时清除当前范围缓存与开关状态。
 - 商品绑定调试缓存的五项读写操作已由 content.js 直接使用 `chrome.storage.local`，错误状态会显示真实错误并输出开发日志。
 - 商品绑定扫描缓存现保留当前快照、上一版快照和最近一次差异；以“标准化关键词 + 类目”比较新增、移除及线索来源/搜索次数/在售商品变化，定位字段继续只用于页面定位。
-- 商品绑定面板会显示关键词库数量、与上一版的变化摘要和更新时间；首次可关联 CrawlHub 项目根目录，目录句柄以 structured clone 写入 IndexedDB。授权有效时，每次完整扫描成功会自动覆盖固定的 `data/product_opportunity_keywords.json`；浏览器不支持或目录授权被拒绝时保留 Blob 下载兜底。项目内同路径文件保持稳定 JSON 结构，供后续标题 Skill 读取。
+- 商品绑定面板会显示关键词库数量、与上一版的变化摘要和更新时间；首次可关联 CrawlHub 项目根目录，目录句柄复用默认导出目录的 IndexedDB structured-clone 保存机制。关联过程会显示 manifest/data/保存/权限/测试写入阶段及真实错误；授权有效时，每次完整扫描成功会自动覆盖固定的 `data/product_opportunity_keywords.json`；浏览器不支持或目录授权被拒绝时保留 Blob 下载兜底。项目内同路径文件保持稳定 JSON 结构，供后续标题 Skill 读取。
 
 ## 问题
 

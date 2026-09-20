@@ -960,50 +960,16 @@ function bindingSkillDataSource(snapshot) {
   };
 }
 
-const skillDataHandleDatabase = "crawlHubFileHandles";
-const skillDataHandleStore = "handles";
-const skillDataProjectRootKey = "skillDataProjectRoot";
-
-function openSkillDataHandleDatabase() {
-  if (!window.indexedDB) throw new Error("当前浏览器不支持保存项目目录授权。");
-  return new Promise((resolve, reject) => {
-    const request = window.indexedDB.open(skillDataHandleDatabase, 1);
-    request.onupgradeneeded = () => {
-      if (!request.result.objectStoreNames.contains(skillDataHandleStore)) request.result.createObjectStore(skillDataHandleStore, { keyPath: "key" });
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error || new Error("项目目录授权无法保存。"));
-  });
-}
-
 async function readSkillDataProjectRootHandle() {
-  const database = await openSkillDataHandleDatabase();
-  return new Promise((resolve, reject) => {
-    const request = database.transaction(skillDataHandleStore, "readonly").objectStore(skillDataHandleStore).get(skillDataProjectRootKey);
-    request.onsuccess = () => {
-      database.close();
-      resolve(request.result?.handle || null);
-    };
-    request.onerror = () => {
-      database.close();
-      reject(request.error || new Error("项目目录授权无法读取。"));
-    };
-  });
+  return readExportRootDirectory();
 }
 
 async function saveSkillDataProjectRootHandle(handle) {
-  const database = await openSkillDataHandleDatabase();
-  return new Promise((resolve, reject) => {
-    const request = database.transaction(skillDataHandleStore, "readwrite").objectStore(skillDataHandleStore).put({ key: skillDataProjectRootKey, handle });
-    request.onsuccess = () => {
-      database.close();
-      resolve();
-    };
-    request.onerror = () => {
-      database.close();
-      reject(request.error || new Error("项目目录授权无法保存。"));
-    };
-  });
+  try {
+    await saveExportRootDirectory(handle);
+  } catch (error) {
+    throw new Error(`项目目录授权无法保存：${error?.message || "当前浏览器无法持久保存目录权限"}`);
+  }
 }
 
 async function skillDataProjectRootPermission(handle, { request = false } = {}) {
@@ -1018,8 +984,17 @@ async function skillDataProjectRootPermission(handle, { request = false } = {}) 
 
 async function validateSkillDataProjectRoot(handle) {
   if (!handle || handle.kind !== "directory") throw new Error("请选择 CrawlHub 项目根目录。");
-  await handle.getFileHandle("manifest.json", { create: false });
-  await handle.getDirectoryHandle("data", { create: true });
+  try {
+    await handle.getFileHandle("manifest.json", { create: false });
+  } catch (error) {
+    if (error?.name === "NotFoundError") throw new Error("未找到 manifest.json，请选择 CrawlHub 项目根目录");
+    throw error;
+  }
+  try {
+    await handle.getDirectoryHandle("data", { create: true });
+  } catch (error) {
+    throw new Error(`无法取得或创建 data 目录：${error?.message || "没有读写权限"}`);
+  }
   return handle;
 }
 
@@ -4145,6 +4120,7 @@ function installPanel() {
   let skillDataProjectRootHandle = null;
   let skillDataProjectRootState = "checking";
   let skillDataSyncNotice = "";
+  let skillDataConnectionPhase = "";
   let skillDataDirectoryBusy = false;
   let previousCollectionPageType = null;
   const header = shadow.querySelector("header");
@@ -4400,19 +4376,34 @@ function installPanel() {
       bindingSkillDataState.textContent = "Skill 数据源：正在检查目录关联…";
       return;
     }
+    if (skillDataProjectRootState === "connecting") {
+      bindingSkillDataState.textContent = `Skill 数据源：正在关联项目目录\n阶段：${skillDataConnectionPhase || "directory_selected"}`;
+      return;
+    }
     if (skillDataProjectRootState === "unlinked") {
-      bindingSkillDataState.textContent = "Skill 数据源：尚未关联项目目录";
+      bindingSkillDataState.textContent = skillDataSyncNotice
+        ? `Skill 数据源：关联失败\n原因：${skillDataSyncNotice}`
+        : "Skill 数据源：尚未关联项目目录";
       return;
     }
     if (skillDataProjectRootState === "permission_required") {
-      bindingSkillDataState.textContent = "Skill 数据源需要重新授权";
+      bindingSkillDataState.textContent = skillDataSyncNotice
+        ? `Skill 数据源需要重新授权\n原因：${skillDataSyncNotice}`
+        : "Skill 数据源需要重新授权";
       return;
     }
     if (skillDataProjectRootState === "permission_denied") {
-      bindingSkillDataState.textContent = "Skill 数据源需要重新授权，可使用文件导出方式。";
+      bindingSkillDataState.textContent = skillDataSyncNotice
+        ? `Skill 数据源需要重新授权，可使用文件导出方式。\n原因：${skillDataSyncNotice}`
+        : "Skill 数据源需要重新授权，可使用文件导出方式。";
       return;
     }
     bindingSkillDataState.textContent = `Skill 数据源：已连接\ndata/product_opportunity_keywords.json${skillDataSyncNotice ? `\n${skillDataSyncNotice}` : ""}`;
+  };
+  const setSkillDataConnectionPhase = (phase) => {
+    skillDataConnectionPhase = phase;
+    console.debug(`[CrawlHub][Skill 数据源] ${phase}`);
+    if (skillDataProjectRootState === "connecting") renderBinding();
   };
   const renderBinding = () => {
     const session = window.__crawlHubBindingSession;
@@ -4603,18 +4594,36 @@ function installPanel() {
     skillDataSyncNotice = "最新 Skill 数据源已导出。";
     renderBinding();
   };
+  const establishSkillDataConnection = async (handle, successNotice) => {
+    setSkillDataConnectionPhase("permission_request");
+    const permission = await skillDataProjectRootPermission(handle, { request: true });
+    if (permission !== "granted") throw new Error("没有读写权限");
+    setSkillDataConnectionPhase("permission_granted");
+    const snapshot = window.__crawlHubBindingSession?.keyword_database?.current_snapshot;
+    if (snapshot) {
+      setSkillDataConnectionPhase("test_write");
+      await syncProductOpportunitySkillData(handle, snapshot);
+      setSkillDataConnectionPhase("test_write_success");
+      skillDataSyncNotice = successNotice;
+    } else {
+      skillDataSyncNotice = "完成下一次扫描后将自动写入数据。";
+    }
+    skillDataProjectRootState = "connected";
+  };
   const syncCurrentProductOpportunitySkillData = async () => {
     const snapshot = window.__crawlHubBindingSession?.keyword_database?.current_snapshot;
     if (!snapshot || skillDataProjectRootState !== "connected" || !skillDataProjectRootHandle) return false;
     try {
+      setSkillDataConnectionPhase("test_write");
       await syncProductOpportunitySkillData(skillDataProjectRootHandle, snapshot);
+      setSkillDataConnectionPhase("test_write_success");
       skillDataSyncNotice = "Skill 数据源已同步";
       return true;
     } catch (error) {
       console.error("[CrawlHub] skill data sync failed", error);
       const permission = await skillDataProjectRootPermission(skillDataProjectRootHandle).catch(() => "denied");
       skillDataProjectRootState = permission === "prompt" ? "permission_required" : "permission_denied";
-      skillDataSyncNotice = error?.message || "Skill 数据源同步失败。";
+      skillDataSyncNotice = error?.message || "数据文件写入失败";
       return false;
     } finally {
       renderBinding();
@@ -4635,10 +4644,11 @@ function installPanel() {
       skillDataProjectRootHandle = handle;
       const permission = await skillDataProjectRootPermission(handle);
       skillDataProjectRootState = permission === "granted" ? "connected" : "permission_required";
+      if (permission === "granted") setSkillDataConnectionPhase("permission_granted");
     } catch (error) {
       console.error("[CrawlHub] skill data directory restore failed", error);
       skillDataProjectRootState = "unlinked";
-      skillDataSyncNotice = "项目目录关联暂不可用，请重新关联。";
+      skillDataSyncNotice = `恢复失败：${error?.message || "项目目录关联暂不可用，请重新关联。"}`;
     } finally {
       renderBinding();
     }
@@ -4652,22 +4662,31 @@ function installPanel() {
     }
     skillDataDirectoryBusy = true;
     skillDataSyncNotice = "";
+    skillDataConnectionPhase = "directory_selected";
+    skillDataProjectRootState = "connecting";
     renderBinding();
     try {
       const handle = await window.showDirectoryPicker({ mode: "readwrite" });
+      setSkillDataConnectionPhase("directory_selected");
+      setSkillDataConnectionPhase("root_validate");
       await validateSkillDataProjectRoot(handle);
+      setSkillDataConnectionPhase("root_validated");
+      setSkillDataConnectionPhase("handle_save");
       await saveSkillDataProjectRootHandle(handle);
+      setSkillDataConnectionPhase("handle_saved");
       skillDataProjectRootHandle = handle;
-      const permission = await skillDataProjectRootPermission(handle, { request: true });
-      skillDataProjectRootState = permission === "granted" ? "connected" : "permission_denied";
-      if (skillDataProjectRootState === "connected") await syncCurrentProductOpportunitySkillData();
+      await establishSkillDataConnection(handle, "最新数据已同步");
     } catch (error) {
       if (error?.name === "AbortError") {
-        skillDataSyncNotice = "已取消关联项目目录。";
+        skillDataProjectRootState = "unlinked";
+        skillDataConnectionPhase = "";
+        skillDataSyncNotice = "";
       } else {
         console.error("[CrawlHub] skill data directory connect failed", error);
-        skillDataProjectRootState = "unlinked";
-        skillDataSyncNotice = error?.message || "关联项目目录失败。";
+        const permissionFailure = skillDataConnectionPhase === "permission_request"
+          || /权限|NotAllowed|Security/i.test(String(error?.message || ""));
+        skillDataProjectRootState = permissionFailure ? "permission_denied" : "unlinked";
+        skillDataSyncNotice = `${skillDataConnectionPhase || "关联"} 失败：${error?.message || "关联项目目录失败。"}`;
       }
     } finally {
       skillDataDirectoryBusy = false;
@@ -4682,15 +4701,15 @@ function installPanel() {
     if (skillDataDirectoryBusy) return;
     skillDataDirectoryBusy = true;
     skillDataSyncNotice = "";
+    skillDataProjectRootState = "connecting";
+    skillDataConnectionPhase = "permission_request";
     renderBinding();
     try {
-      const permission = await skillDataProjectRootPermission(skillDataProjectRootHandle, { request: true });
-      skillDataProjectRootState = permission === "granted" ? "connected" : "permission_denied";
-      if (skillDataProjectRootState === "connected") await syncCurrentProductOpportunitySkillData();
+      await establishSkillDataConnection(skillDataProjectRootHandle, "最新数据已同步");
     } catch (error) {
       console.error("[CrawlHub] skill data directory reauthorization failed", error);
       skillDataProjectRootState = "permission_denied";
-      skillDataSyncNotice = error?.message || "Skill 数据源重新授权失败。";
+      skillDataSyncNotice = `${skillDataConnectionPhase || "permission_request"} 失败：${error?.message || "Skill 数据源重新授权失败。"}`;
     } finally {
       skillDataDirectoryBusy = false;
       renderBinding();
