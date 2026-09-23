@@ -48,8 +48,8 @@
 - 商品绑定扫描缓存现保留当前快照、上一版快照和最近一次差异；以“标准化关键词 + 类目”比较新增、移除及线索来源/搜索次数/在售商品变化，定位字段继续只用于页面定位。
 - 商品绑定面板会显示关键词库数量、与上一版的变化摘要和更新时间；首次可关联 CrawlHub 项目根目录，目录句柄复用默认导出目录的 IndexedDB structured-clone 保存机制。关联过程会显示 manifest/data/保存/权限/测试写入阶段及真实错误；扫描完成后会校验 snapshot 数量、重新查询写入权限，并对固定 `data/product_opportunity_keywords.json` 执行写入后回读验证，成功显示实际同步数量；浏览器不支持或目录授权被拒绝时保留 Blob 下载兜底。项目内同路径文件保持稳定 JSON 结构，供后续标题 Skill 读取。
 - Skill 数据源同步新增当前浏览器会话内的专用事件日志 `window.__crawlHubSkillSyncLog`，商品绑定面板可导出 `crawlHub-skill-sync-时间.json`；日志只包含同步阶段、数量、目录名和固定目标文件，不写入仓库。
-- 新增独立“商品采集”顶级 Tab：仅识别 `shop.tiktok.com/view/product/<数字 ID>` 且具有商品标题的前台商品详情页。V1 从当前 DOM 采集基础信息、顶部轮播、属性表、SKU 规格与商品描述，导出 `tiktok-product-<product_id>.json`；不调用 TikTok API，不影响现有三项功能或既有导出结构。
-- 商品采集支持在需要时打开“选择选项”SKU 弹层并在完成后关闭自身打开的弹层；新增 `window.__crawlHubProductDetailDebugLog` 与调试日志导出。SKU 弹层按可见文本和固定定位特征识别，不依赖固定 XPath 或动态 class。
+- 新增独立“商品采集”顶级 Tab：仅识别 `shop.tiktok.com/view/product/<数字 ID>` 且具有商品标题的前台商品详情页。素材包 V1 从当前 DOM 采集基础信息、顶部轮播、属性表与商品描述，并保存到 `data/tiktok_products/<product_id>/product.json` 及图片子目录；本轮不调用 SKU，不调用 TikTok API，不影响现有三项功能或既有导出结构。
+- 商品采集复用已关联 CrawlHub 项目目录，支持通过扩展后台桥下载 TikTok 商品 CDN 图片；图片失败保留 `source_url` 并将 `local_path` 写为 `null`，`product.json` 最后写入并回读校验后才显示完成。新增 `window.__crawlHubProductDetailDebugLog` 与调试日志导出。
 
 ## 问题
 
@@ -61,4 +61,4 @@
 - 登录 TikTok Seller Center 后，先验证统一滚动引擎能扫描到列表底部且数量持续增加；再用一条已加载关键词验证“定位并打开”完整流程。随后验证短视频榜采集与导出、六榜采集与导出及任务恢复。如需真实 URL 或达人名称，再分别采样视频卡片和达人头像容器的链接/文本属性。
 - 商品绑定扫描新增暂停/继续控制：暂停时保留当前页面会话索引与已发现数量，继续时从当前滚动位置恢复，不清空、不回顶、不重启。
 - 建议先关联真实 CrawlHub 项目根目录并完成一次扫描，确认固定 `data/product_opportunity_keywords.json` 自动更新；再扫描一次验证新增/移除/数据变化摘要与自动同步。批量提报仍建议先用 5–10 条任务验证缓存定位恢复、已绑定晚出现、主表恢复、2 秒冷却与结果/批量调试日志是否一致。
-- 在可正常打开的 `shop.tiktok.com/view/product/...` 商品页重载扩展后，进入“商品采集”执行一次采集并导出 JSON；核对商品 ID、标题、轮播位/唯一图数量、Color/Size 数量、属性数量、描述文字与图片数量。
+- 在可正常打开的 `shop.tiktok.com/view/product/...` 商品页重载扩展后，进入“商品采集”执行一次素材包保存；核对商品 ID、标题、价格、轮播/详情图片、本地路径、属性和描述文本，不测试 SKU。

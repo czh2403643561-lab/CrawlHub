@@ -75,7 +75,8 @@ const storageBridgeHandler = async (event) => {
         project: request.project,
         cache_key: request.cache_key,
         cache: request.cache,
-        enabled: request.enabled
+        enabled: request.enabled,
+        url: request.url
       });
     document.dispatchEvent(new CustomEvent(storageResponseEvent, {
       detail: { request_id: request.request_id, ...(response || { ok: false, error: "本地数据服务未响应" }) }

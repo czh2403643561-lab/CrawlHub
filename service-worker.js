@@ -17,6 +17,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   (async () => {
     if (message.type === "crawlHub:ping") return { connected: true };
+    if (message.type === "crawlHub:download-image") {
+      const imageUrl = new URL(String(message.url || ""));
+      if (imageUrl.protocol !== "https:" || !/(?:^|\.)tiktokcdn(?:-eu)?\.com$|(?:^|\.)ibytedtos\.com$/i.test(imageUrl.hostname)) {
+        throw new Error("图片地址不是受支持的 TikTok 商品 CDN");
+      }
+      const response = await fetch(imageUrl.href, { credentials: "omit" });
+      if (!response.ok) throw new Error(`图片下载失败（HTTP ${response.status}）`);
+      return { data: await response.arrayBuffer(), content_type: response.headers.get("content-type") || "" };
+    }
     if (message.type === "crawlHub:download-batch-template") {
       const response = await fetch(chrome.runtime.getURL("templates/CrawlHub_批量提报模板.csv"));
       if (!response.ok) throw new Error("导入模板读取失败。");
