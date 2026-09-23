@@ -6,12 +6,80 @@
   let hoverHost, hoverShadow, activeImage, hideTimer;
   let panelHost, panelShadow, currentJob, cropMode = false, cropSource = "", firstNotice = false, panelDismissed = false;
   let resultImageObserver;
+  let contextInvalidatedHandled = false;
 
   const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
   const escape = (value) => clean(value).replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
   const productId = () => location.pathname.match(/^\/view\/product\/(\d{8,24})(?:\/|$)/)?.[1] || "";
   const isProductPage = () => location.hostname === "shop.tiktok.com" && Boolean(productId());
   const imageUrl = (image) => image?.currentSrc || image?.getAttribute("src") || "";
+
+  function isExtensionContextInvalidated(error) {
+    const message = String(error?.message || error || "");
+    return /extension context invalidated/i.test(message) || /context invalidated/i.test(message);
+  }
+  function handleInvalidExtensionContext() {
+    if (contextInvalidatedHandled) return;
+    contextInvalidatedHandled = true;
+    enabled = false;
+    document.removeEventListener("pointerover", handleProductImagePointerOver, true);
+    document.removeEventListener("pointerout", handleProductImagePointerOut, true);
+    removeEventListener("scroll", syncHoverPosition, true);
+    removeEventListener("resize", syncHoverPosition);
+    resultImageObserver?.disconnect(); resultImageObserver = undefined;
+    clearHideTimer();
+    hoverHost?.remove(); hoverHost = hoverShadow = activeImage = undefined;
+    panelHost?.remove(); panelHost = panelShadow = undefined;
+    currentJob = undefined; cropMode = false; cropSource = ""; panelDismissed = true;
+    console.warn("[CrawlHub] Extension context invalidated, reloading TikTok page.");
+    try {
+      const key = "crawlHub.extensionContextReloadAt";
+      const lastReload = Number(sessionStorage.getItem(key) || 0);
+      if (!lastReload || Date.now() - lastReload >= 10000) {
+        sessionStorage.setItem(key, String(Date.now()));
+        setTimeout(() => location.reload(), 100);
+      }
+    } catch (error) {
+      console.error("[CrawlHub] Failed to schedule context recovery", error);
+    }
+  }
+  async function safeRuntimeMessage(message) {
+    try {
+      return await chrome.runtime.sendMessage(message);
+    } catch (error) {
+      if (isExtensionContextInvalidated(error)) {
+        handleInvalidExtensionContext();
+        return { ok: false, context_invalidated: true };
+      }
+      console.error("[CrawlHub] Runtime message failed", error);
+      return { ok: false, error: error?.message || String(error || "运行时通信失败") };
+    }
+  }
+  async function safeStorageGet(key) {
+    try {
+      return await chrome.storage.local.get(key);
+    } catch (error) {
+      if (isExtensionContextInvalidated(error)) {
+        handleInvalidExtensionContext();
+        return null;
+      }
+      console.error("[CrawlHub] Storage read failed", error);
+      return null;
+    }
+  }
+  async function safeStorageSet(values) {
+    try {
+      await chrome.storage.local.set(values);
+      return true;
+    } catch (error) {
+      if (isExtensionContextInvalidated(error)) {
+        handleInvalidExtensionContext();
+        return false;
+      }
+      console.error("[CrawlHub] Storage write failed", error);
+      return false;
+    }
+  }
 
   function isSourceImage(url) {
     try {
@@ -88,7 +156,7 @@
     resultImageObserver?.disconnect(); resultImageObserver = undefined;
     panelHost?.remove(); panelHost = panelShadow = undefined;
     cropMode = false; cropSource = ""; currentJob = undefined; panelDismissed = true;
-    if (cancelJob) void chrome.runtime.sendMessage({ type: "CANCEL_1688_IMAGE_SEARCH" }).catch(() => undefined);
+    if (cancelJob && !contextInvalidatedHandled) void safeRuntimeMessage({ type: "CANCEL_1688_IMAGE_SEARCH" });
   }
   function stopTikTokImageSearch() {
     enabled = false; clearHideTimer();
@@ -116,12 +184,14 @@
   }
   async function startSourcing(product, dataUrl) {
     panelDismissed = false; ensurePanel(); cropMode = false;
-    const stored = await chrome.storage.local.get("crawlHub.1688ImageSearchNotice.v1").catch(() => ({}));
-    firstNotice = !stored["crawlHub.1688ImageSearchNotice.v1"];
-    if (firstNotice) await chrome.storage.local.set({ "crawlHub.1688ImageSearchNotice.v1": true }).catch(() => undefined);
+    const stored = await safeStorageGet("crawlHub.1688ImageSearchNotice.v1");
+    if (contextInvalidatedHandled) return;
+    firstNotice = !stored?.["crawlHub.1688ImageSearchNotice.v1"];
+    if (firstNotice) await safeStorageSet({ "crawlHub.1688ImageSearchNotice.v1": true });
+    if (contextInvalidatedHandled) return;
     currentJob = { source_product_id: product.product_id, source_title: product.title, source_image_url: product.image_url, query_image_data_url: dataUrl || "", state: "preparing-image", results: [] };
     render();
-    const response = await chrome.runtime.sendMessage({ type: "START_1688_IMAGE_SEARCH", product, query_image_data_url: dataUrl }).catch((error) => ({ ok: false, error: String(error) }));
+    const response = await safeRuntimeMessage({ type: "START_1688_IMAGE_SEARCH", product, query_image_data_url: dataUrl });
     if (!response?.ok && currentJob) { currentJob.state = "failed"; currentJob.error = response?.error || "无法启动1688图搜。"; render(); }
   }
 
@@ -146,7 +216,7 @@
   function proxyResultImage(image, startedAt) {
     if (image.dataset.proxyStarted) return; image.dataset.proxyStarted = "true";
     imageDiagnostic("result_image_proxy_start", image, startedAt);
-    void chrome.runtime.sendMessage({ type: "FETCH_1688_RESULT_IMAGE", url: image.dataset.source }).then((response) => {
+    void safeRuntimeMessage({ type: "FETCH_1688_RESULT_IMAGE", url: image.dataset.source }).then((response) => {
       if (!response?.ok || !response.data_url) throw new Error(response?.error || "图片代理无响应");
       image.onerror = null; image.src = response.data_url; imageDiagnostic("result_image_proxy_loaded", image, startedAt);
     }).catch(() => { imageDiagnostic("result_image_proxy_failed", image, startedAt); image.closest(".pic")?.classList.add("image-failed"); });
@@ -177,14 +247,14 @@
     panelShadow.querySelector("[data-retry]")?.addEventListener("click", () => { if (currentJob) void startSourcing({ product_id: currentJob.source_product_id, title: currentJob.source_title, image_url: currentJob.source_image_url }, currentJob.query_image_data_url || undefined); });
     panelShadow.querySelector("[data-crop]")?.addEventListener("click", () => void openCrop());
     panelShadow.querySelector("[data-crop-cancel]")?.addEventListener("click", () => { cropMode = false; render(); });
-    panelShadow.querySelector("[data-recheck]")?.addEventListener("click", () => void chrome.runtime.sendMessage({ type: "RECHECK_1688_LOGIN" }));
-    panelShadow.querySelector("[data-login]")?.addEventListener("click", () => void chrome.runtime.sendMessage({ type: "REOPEN_1688_LOGIN" }));
-    panelShadow.querySelector("[data-official]")?.addEventListener("click", () => void chrome.runtime.sendMessage({ type: "OPEN_1688_OFFICIAL_SEARCH" }));
-    for (const element of panelShadow.querySelectorAll(".card")) { const open = () => void chrome.runtime.sendMessage({ type: "OPEN_1688_OFFER", offer_id: element.dataset.offer }); element.addEventListener("click", open); element.addEventListener("keydown", (event) => { if (event.key === "Enter") open(); }); }
+    panelShadow.querySelector("[data-recheck]")?.addEventListener("click", () => void safeRuntimeMessage({ type: "RECHECK_1688_LOGIN" }));
+    panelShadow.querySelector("[data-login]")?.addEventListener("click", () => void safeRuntimeMessage({ type: "REOPEN_1688_LOGIN" }));
+    panelShadow.querySelector("[data-official]")?.addEventListener("click", () => void safeRuntimeMessage({ type: "OPEN_1688_OFFICIAL_SEARCH" }));
+    for (const element of panelShadow.querySelectorAll(".card")) { const open = () => void safeRuntimeMessage({ type: "OPEN_1688_OFFER", offer_id: element.dataset.offer }); element.addEventListener("click", open); element.addEventListener("keydown", (event) => { if (event.key === "Enter") open(); }); }
   }
   async function openCrop() {
     if (!currentJob) return; cropSource = currentJob.query_image_data_url;
-    if (!cropSource) { const response = await chrome.runtime.sendMessage({ type: "PREPARE_SOURCE_IMAGE", image_url: currentJob.source_image_url }); if (!response?.ok) { currentJob.state = "failed"; currentJob.error = response?.error || "无法读取原图。"; render(); return; } cropSource = response.data_url; }
+    if (!cropSource) { const response = await safeRuntimeMessage({ type: "PREPARE_SOURCE_IMAGE", image_url: currentJob.source_image_url }); if (!response?.ok) { currentJob.state = "failed"; currentJob.error = response?.error || "无法读取原图。"; render(); return; } cropSource = response.data_url; }
     cropMode = true; render();
   }
   async function initializeCrop() {
@@ -199,18 +269,23 @@
     panelShadow.querySelector("[data-crop-apply]")?.addEventListener("click", () => { const rect = canvas.getBoundingClientRect(), x = Math.min(sx, ex) * canvas.width / rect.width, y = Math.min(sy, ey) * canvas.height / rect.height, width = Math.abs(ex - sx) * canvas.width / rect.width, height = Math.abs(ey - sy) * canvas.height / rect.height; if (width < 20 || height < 20 || !currentJob) return; const output = document.createElement("canvas"); output.width = Math.round(width); output.height = Math.round(height); output.getContext("2d")?.drawImage(canvas, x, y, width, height, 0, 0, output.width, output.height); void startSourcing({ product_id: currentJob.source_product_id, title: currentJob.source_title, image_url: currentJob.source_image_url }, output.toDataURL("image/jpeg", .88)); });
   }
 
-  chrome.runtime.onMessage.addListener((message) => {
-    if (message?.type !== "SOURCING_JOB_UPDATED" || !message.job) return;
-    currentJob = message.job;
-    if (currentJob.state !== "cancelled" && !panelDismissed) { ensurePanel(); render(); }
-  });
-  chrome.storage.onChanged.addListener((changes, area) => { if (area === "local" && changes[ENABLED_KEY]) changes[ENABLED_KEY].newValue !== false ? startTikTokImageSearch() : stopTikTokImageSearch(); });
+  try {
+    chrome.runtime.onMessage.addListener((message) => {
+      if (message?.type !== "SOURCING_JOB_UPDATED" || !message.job) return;
+      currentJob = message.job;
+      if (currentJob.state !== "cancelled" && !panelDismissed) { ensurePanel(); render(); }
+    });
+    chrome.storage.onChanged.addListener((changes, area) => { if (area === "local" && changes[ENABLED_KEY]) changes[ENABLED_KEY].newValue !== false ? startTikTokImageSearch() : stopTikTokImageSearch(); });
+  } catch (error) {
+    if (isExtensionContextInvalidated(error)) handleInvalidExtensionContext();
+    else console.error("[CrawlHub] Failed to register extension listeners", error);
+  }
   addEventListener("popstate", () => { if (!isProductPage()) stopTikTokImageSearch(); });
   addEventListener("pagehide", () => stopTikTokImageSearch());
 
   if (!globalThis.__crawlHubTikTokImageSearchInstalled && isProductPage()) {
     globalThis.__crawlHubTikTokImageSearchInstalled = true;
-    chrome.storage.local.get(ENABLED_KEY).then((stored) => { if (stored[ENABLED_KEY] !== false) startTikTokImageSearch(); });
-    chrome.runtime.sendMessage({ type: "GET_1688_IMAGE_SEARCH_JOB" }).then((response) => { if (response?.job && response.job.state !== "cancelled") { currentJob = response.job; ensurePanel(); render(); } }).catch(() => undefined);
+    void safeStorageGet(ENABLED_KEY).then((stored) => { if (!contextInvalidatedHandled && stored?.[ENABLED_KEY] !== false) startTikTokImageSearch(); });
+    void safeRuntimeMessage({ type: "GET_1688_IMAGE_SEARCH_JOB" }).then((response) => { if (!contextInvalidatedHandled && response?.job && response.job.state !== "cancelled") { currentJob = response.job; ensurePanel(); render(); } });
   }
 })();
