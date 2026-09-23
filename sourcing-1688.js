@@ -7,13 +7,11 @@
   const SEARCH_URL = "https://search.1688.com/service/imageSearchOfferResultViewService";
   const OFFICIAL_URL = "https://air.1688.com/kapp/1688-search/pc-image-search/?tab=imageSearch";
   const SESSION_KEY = "crawlHub.active1688ImageSearch.v1";
-  const MESSAGE_TYPES = new Set(["START_1688_IMAGE_SEARCH", "CANCEL_1688_IMAGE_SEARCH", "GET_1688_IMAGE_SEARCH_JOB", "OPEN_1688_LOGIN", "REOPEN_1688_LOGIN", "RECHECK_1688_LOGIN", "OPEN_1688_OFFICIAL_SEARCH", "OPEN_1688_OFFER", "PREPARE_SOURCE_IMAGE", "FETCH_1688_RESULT_IMAGE"]);
+  const MESSAGE_TYPES = new Set(["START_1688_IMAGE_SEARCH", "CANCEL_1688_IMAGE_SEARCH", "GET_1688_IMAGE_SEARCH_JOB", "OPEN_1688_LOGIN", "REOPEN_1688_LOGIN", "RECHECK_1688_LOGIN", "OPEN_1688_OFFICIAL_SEARCH", "OPEN_1688_OFFER", "PREPARE_SOURCE_IMAGE"]);
 
   let currentJob;
   let generation = 0;
   let authResumeInFlight = false;
-  let imageProxyActive = 0;
-  const imageProxyQueue = [];
   const recovery = restoreSession();
 
   const shifts = [7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21];
@@ -142,37 +140,6 @@
     return { results, session: { image_id: session.image_id, request_id: payload.requestId || session.request_id, session_id: payload.sessionId || session.session_id }, has_more: payload.pageCount ? pageNumber < payload.pageCount : payload.offers.length >= pageSize, diagnostics: { raw_offer_count: payload.offers.length, normalized_count: results.length, dropped_count: payload.offers.length - results.length, dropped_missing_identity: payload.offers.filter((item) => !offerId(item)).length, missing_image_count: results.filter((item) => !item.image_url).length, complete_card_count: results.filter((item) => item.image_url && !item.title.startsWith("1688 商品 ") && item.price).length } };
   }
   async function blobDataUrl(blob) { const bytes = new Uint8Array(await blob.arrayBuffer()); let binary = ""; for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return `data:${blob.type || "image/jpeg"};base64,${btoa(binary)}`; }
-  function runImageProxyQueue() {
-    while (imageProxyActive < 4 && imageProxyQueue.length) {
-      const task = imageProxyQueue.shift(); imageProxyActive += 1;
-      task().finally(() => { imageProxyActive -= 1; runImageProxyQueue(); });
-    }
-  }
-  function fetch1688ResultImage(url) {
-    return new Promise((resolve, reject) => {
-      imageProxyQueue.push(async () => {
-        const startedAt = performance.now();
-        let host = "", status = 0, contentType = "";
-        try {
-          const parsed = new URL(url);
-          host = parsed.hostname;
-          if (!/^https?:$/.test(parsed.protocol) || !/(?:^|\.)(?:alicdn\.com|1688\.com)$/i.test(parsed.hostname)) throw new Error("图片地址不属于允许的1688图片 CDN。");
-          const response = await fetch(parsed.href, { credentials: "omit", referrerPolicy: "no-referrer" });
-          status = response.status;
-          contentType = response.headers.get("content-type") || "";
-          if (!response.ok) throw new Error(`1688图片代理失败（HTTP ${response.status}）。`);
-          if (!/^image\//i.test(contentType)) throw new Error("1688图片代理返回的不是图片。");
-          const blob = await response.blob();
-          console.debug("[CrawlHub][1688 proxy]", { host, status, content_type: contentType, elapsed_ms: Math.round(performance.now() - startedAt) });
-          resolve({ data_url: await blobDataUrl(blob), content_type: contentType, byte_length: blob.size });
-        } catch (error) {
-          console.debug("[CrawlHub][1688 proxy]", { host, status, content_type: contentType, elapsed_ms: Math.round(performance.now() - startedAt), error: error?.message || String(error) });
-          reject(error);
-        }
-      });
-      runImageProxyQueue();
-    });
-  }
   async function prepareImageDataUrl(imageUrl) {
     if (String(imageUrl).startsWith("data:image/")) return imageUrl;
     const parsed = new URL(imageUrl); if (!/^https?:$/.test(parsed.protocol)) throw new Error("商品图片地址无效。");
@@ -206,5 +173,5 @@
   async function restoreSession() { const stored = await chrome.storage.session.get(SESSION_KEY).catch(() => ({})), restored = stored[SESSION_KEY]; if (!restored?.id) return; currentJob = restored; const token = ++generation; if (["preparing-image", "uploading", "searching"].includes(restored.state)) { restored.state = "preparing-image"; restored.results = []; restored.next_page = 1; restored.has_more = false; restored.official_session = undefined; await broadcast(); void run(token); } else if (restored.state === "ready" && restored.enrichment_state === "running") { restored.enrichment_state = "partial"; restored.enrichment_error = "扩展重新启动，已保留当前可用结果。"; restored.fallback_tab_id = undefined; await broadcast(); } }
   chrome.cookies.onChanged.addListener((change) => { if (change.cookie.name === "_m_h5_tk" && /(^|\.)1688\.com$/i.test(change.cookie.domain)) void resumeAuth(); });
   chrome.tabs.onRemoved.addListener((tabId) => { if (currentJob?.source_tab_id === tabId) void cancel(); if (currentJob?.fallback_tab_id === tabId && currentJob) { currentJob.fallback_tab_id = undefined; currentJob.enrichment_state = "partial"; currentJob.enrichment_error = "官方结果补充页已关闭，已保留当前可用结果。"; void broadcast(); } if (currentJob?.login_tab_id === tabId) { currentJob.login_tab_id = undefined; void broadcast(); } });
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => { if (!MESSAGE_TYPES.has(message?.type)) return undefined; (async () => { await recovery; if (message.type === "START_1688_IMAGE_SEARCH") return start(message.product, message.query_image_data_url, sender.tab?.id); if (message.type === "CANCEL_1688_IMAGE_SEARCH") { await cancel(); return { ok: true }; } if (message.type === "GET_1688_IMAGE_SEARCH_JOB") return { ok: true, job: currentJob && (!sender.tab?.id || currentJob.source_tab_id === sender.tab.id) ? currentJob : undefined }; if (message.type === "PREPARE_SOURCE_IMAGE") return { ok: true, data_url: await prepareImageDataUrl(String(message.image_url || "")) }; if (message.type === "FETCH_1688_RESULT_IMAGE") return { ok: true, ...(await fetch1688ResultImage(String(message.url || ""))) }; if (message.type === "OPEN_1688_OFFER") { const offerId = String(message.offer_id || ""); if (!/^\d{8,}$/.test(offerId)) return { ok: false, error: "1688 商品 ID 无效。" }; await chrome.tabs.create({ url: `https://detail.1688.com/offer/${offerId}.html`, active: true }); return { ok: true }; } if (message.type === "OPEN_1688_OFFICIAL_SEARCH") { await chrome.tabs.create({ url: currentJob ? officialSearchUrl(currentJob) : OFFICIAL_URL, active: true }); return { ok: true }; } if (message.type === "OPEN_1688_LOGIN" || message.type === "REOPEN_1688_LOGIN") { await openLogin(); return { ok: true }; } if (message.type === "RECHECK_1688_LOGIN") { const connected = await resumeAuth(); return { ok: connected, connected, error: connected ? undefined : "尚未检测到1688登录状态，请完成验证后再试。" }; } return { ok: false, error: "未知的1688图搜请求。" }; })().then((value) => sendResponse(value), (error) => sendResponse({ ok: false, error: errorMessage(error, "1688图搜请求失败。") })); return true; });
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => { if (!MESSAGE_TYPES.has(message?.type)) return undefined; (async () => { await recovery; if (message.type === "START_1688_IMAGE_SEARCH") return start(message.product, message.query_image_data_url, sender.tab?.id); if (message.type === "CANCEL_1688_IMAGE_SEARCH") { await cancel(); return { ok: true }; } if (message.type === "GET_1688_IMAGE_SEARCH_JOB") return { ok: true, job: currentJob && (!sender.tab?.id || currentJob.source_tab_id === sender.tab.id) ? currentJob : undefined }; if (message.type === "PREPARE_SOURCE_IMAGE") return { ok: true, data_url: await prepareImageDataUrl(String(message.image_url || "")) }; if (message.type === "OPEN_1688_OFFER") { const offerId = String(message.offer_id || ""); if (!/^\d{8,}$/.test(offerId)) return { ok: false, error: "1688 商品 ID 无效。" }; await chrome.tabs.create({ url: `https://detail.1688.com/offer/${offerId}.html`, active: true }); return { ok: true }; } if (message.type === "OPEN_1688_OFFICIAL_SEARCH") { await chrome.tabs.create({ url: currentJob ? officialSearchUrl(currentJob) : OFFICIAL_URL, active: true }); return { ok: true }; } if (message.type === "OPEN_1688_LOGIN" || message.type === "REOPEN_1688_LOGIN") { await openLogin(); return { ok: true }; } if (message.type === "RECHECK_1688_LOGIN") { const connected = await resumeAuth(); return { ok: connected, connected, error: connected ? undefined : "尚未检测到1688登录状态，请完成验证后再试。" }; } return { ok: false, error: "未知的1688图搜请求。" }; })().then((value) => sendResponse(value), (error) => sendResponse({ ok: false, error: errorMessage(error, "1688图搜请求失败。") })); return true; });
 })();
