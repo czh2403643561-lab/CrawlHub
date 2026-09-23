@@ -151,16 +151,24 @@
   function fetch1688ResultImage(url) {
     return new Promise((resolve, reject) => {
       imageProxyQueue.push(async () => {
+        const startedAt = performance.now();
+        let host = "", status = 0, contentType = "";
         try {
           const parsed = new URL(url);
+          host = parsed.hostname;
           if (!/^https?:$/.test(parsed.protocol) || !/(?:^|\.)(?:alicdn\.com|1688\.com)$/i.test(parsed.hostname)) throw new Error("图片地址不属于允许的1688图片 CDN。");
           const response = await fetch(parsed.href, { credentials: "omit", referrerPolicy: "no-referrer" });
-          const contentType = response.headers.get("content-type") || "";
+          status = response.status;
+          contentType = response.headers.get("content-type") || "";
           if (!response.ok) throw new Error(`1688图片代理失败（HTTP ${response.status}）。`);
           if (!/^image\//i.test(contentType)) throw new Error("1688图片代理返回的不是图片。");
           const blob = await response.blob();
+          console.debug("[CrawlHub][1688 proxy]", { host, status, content_type: contentType, elapsed_ms: Math.round(performance.now() - startedAt) });
           resolve({ data_url: await blobDataUrl(blob), content_type: contentType, byte_length: blob.size });
-        } catch (error) { reject(error); }
+        } catch (error) {
+          console.debug("[CrawlHub][1688 proxy]", { host, status, content_type: contentType, elapsed_ms: Math.round(performance.now() - startedAt), error: error?.message || String(error) });
+          reject(error);
+        }
       });
       runImageProxyQueue();
     });

@@ -234,7 +234,15 @@
     const facts = element.querySelector(".facts"); if (facts) facts.innerHTML = resultFactsMarkup(result);
     const badges = element.querySelector(".badges"); if (badges) badges.innerHTML = result.badges?.map((item) => `<em>${escape(item)}</em>`).join("") || "";
     const footer = element.querySelector("footer"); if (footer) footer.innerHTML = `${escape(result.supplier_name || "供应商未显示")} <b>↗</b>`;
-    const image = element.querySelector("img[data-result-image]"); if (image && result.image_url) image.dataset.source = result.image_url;
+    const image = element.querySelector("img[data-result-image]");
+    if (image && result.image_url) {
+      const previousSource = image.dataset.source || "";
+      const state = image.dataset.imageState || "idle";
+      if (previousSource !== result.image_url && state !== "loaded") {
+        resetResultImage(image, result.image_url);
+        queueMicrotask(() => activateResultImage(image));
+      } else if (!previousSource) image.dataset.source = result.image_url;
+    }
   }
   function bindResultCards() {
     for (const element of panelShadow.querySelectorAll(".card")) {
@@ -272,35 +280,128 @@
     panelShadow.innerHTML = `<style>${style}</style><section class="panel"><header class="head"><b class="brand">CrawlHub <small>1688官方图搜</small></b><span class="state">${escape(stateText(job))}</span><div class="actions"><button class="icon" data-collapse title="折叠">‹</button><button class="icon" data-close title="关闭">×</button></div></header><div class="body"><aside class="side">${cropMode ? '<div class="crop"><div class="canvas"><canvas></canvas><div class="cropbox"></div></div><p>拖动框选商品主体</p><button class="btn primary" data-crop-apply>用框选区域重搜</button><button class="btn" data-crop-cancel>取消</button></div>' : `${image ? `<img class="query" src="${escape(image)}" alt="搜索图片">` : ""}<div class="title">${escape(job?.source_title || "尚未选择商品")}</div><div class="id">商品 ID：${escape(job?.source_product_id || "")}</div><button class="btn" data-crop ${!image || working ? "disabled" : ""}>框选主体</button><button class="btn primary" data-retry ${!job || working ? "disabled" : ""}>重新搜索</button>${firstNotice ? '<div class="notice">当前商品图片会提交给1688官方图搜，用于查找相似货源。</div>' : ""}`}</aside><main class="results"><div class="toolbar">1688 推荐顺序 ${results.length ? `· ${results.length} 条结果` : ""}</div><div class="scroll">${auth ? `<div class="error"><b>${challenge ? "1688暂时限制访问" : "需要连接1688"}</b><p>${challenge ? "请在已有的1688页面完成验证，插件不会绕过验证。" : "请在当前浏览器完成1688登录，完成后会自动继续本次搜图。"}</p><button data-recheck>${challenge ? "我已完成验证，重新检测" : "我已登录，重新检测"}</button><button class="alt" data-login>${challenge ? "打开已有1688页面" : "连接1688"}</button></div>` : failed ? `<div class="error">${escape(job.error || "1688图搜暂时失败。")}<button data-official>打开1688官方搜图页</button></div>` : working ? `<div class="loading"><div class="spinner"></div>${escape(stateText(job))}</div>` : results.length ? `<div class="grid">${results.map(card).join("")}</div>` : `<div class="empty">${escape(job?.error || "1688本次没有返回相似货源，可以框选商品主体后重新搜索。")}</div>`}</div></main></div></section>`;
     bindPanel(); if (results.length && !working && !failed && !auth) setupResultImages(); if (cropMode) void initializeCrop();
   }
-  function imageDiagnostic(event, image, startedAt) {
+  function imageDiagnostic(event, image, startedAt, details = {}) {
     let host = ""; try { host = new URL(image.dataset.source || "").hostname; } catch { /* no-op */ }
-    console.debug(`[CrawlHub][1688] ${event}`, { offer_id: image.dataset.offerId, host, elapsed_ms: Math.round(performance.now() - startedAt) });
+    console.debug(`[CrawlHub][1688] ${event}`, { offer_id: image.dataset.offerId, host, elapsed_ms: Math.round(performance.now() - startedAt), ...details });
   }
   function setImageStatus(image, message, hidden = false) {
     const status = image.closest(".pic")?.querySelector(".image-status");
     if (!status) return;
+    if (message === "图片暂不可用" && image.complete && image.naturalWidth > 0) {
+      lockImageLoaded(image, image.dataset.loadedSource || "direct");
+      return;
+    }
     status.textContent = message;
     status.hidden = hidden;
   }
+  function imageRuntime(image, startedAt = performance.now()) {
+    if (!image.__crawlHubImageRuntime) image.__crawlHubImageRuntime = { startedAt, directFailed: false, proxyStarted: false, proxyFailed: false, proxySettled: false, proxySrcApplied: false, fallbackTimer: undefined, proxyTimer: undefined, finalTimer: undefined };
+    return image.__crawlHubImageRuntime;
+  }
+  function clearImageTimers(runtime) {
+    if (runtime?.fallbackTimer) clearTimeout(runtime.fallbackTimer);
+    if (runtime?.proxyTimer) clearTimeout(runtime.proxyTimer);
+    if (runtime?.finalTimer) clearTimeout(runtime.finalTimer);
+    if (runtime) { runtime.fallbackTimer = undefined; runtime.proxyTimer = undefined; runtime.finalTimer = undefined; }
+  }
+  function lockImageLoaded(image, source) {
+    const runtime = imageRuntime(image);
+    if (image.dataset.imageState === "loaded") return true;
+    if (!image.complete || image.naturalWidth <= 0) return false;
+    image.dataset.imageState = "loaded";
+    image.dataset.loadedSource = source;
+    clearImageTimers(runtime);
+    setImageStatus(image, "", true);
+    return true;
+  }
+  function markImageFailed(image, runtime) {
+    if (image.dataset.imageState === "loaded") return;
+    if (image.complete && image.naturalWidth > 0) { lockImageLoaded(image, image.dataset.loadedSource || "direct"); return; }
+    if (!runtime.directFailed || !runtime.proxyFailed) return;
+    image.dataset.imageState = "failed";
+    setImageStatus(image, "图片暂不可用");
+    image.closest(".pic")?.classList.add("image-failed");
+  }
   function proxyResultImage(image, startedAt) {
-    if (image.dataset.proxyStarted) return; image.dataset.proxyStarted = "true";
+    const runtime = imageRuntime(image, startedAt);
+    if (runtime.proxyStarted || image.dataset.imageState === "loaded") return;
+    runtime.proxyStarted = true; image.dataset.proxyStarted = "true"; image.dataset.imageState = "proxy-loading";
     setImageStatus(image, "加载图片…");
     imageDiagnostic("result_image_proxy_start", image, startedAt);
     void safeRuntimeMessage({ type: "FETCH_1688_RESULT_IMAGE", url: image.dataset.source }).then((response) => {
+      if (image.dataset.imageState === "loaded" || runtime.proxyFailed) return;
       if (!response?.ok || !response.data_url) throw new Error(response?.error || "图片代理无响应");
-      image.onerror = null; image.src = response.data_url; setImageStatus(image, "", true); imageDiagnostic("result_image_proxy_loaded", image, startedAt);
-    }).catch(() => { setImageStatus(image, "图片暂不可用"); imageDiagnostic("result_image_proxy_failed", image, startedAt); image.closest(".pic")?.classList.add("image-failed"); });
+      const proxyLoad = () => {
+        if (image.dataset.imageState === "loaded") return;
+        if (lockImageLoaded(image, "proxy")) imageDiagnostic("result_image_proxy_loaded", image, startedAt);
+      };
+      const proxyError = () => {
+        runtime.proxyFailed = true; runtime.proxySettled = true;
+        if (runtime.proxyTimer) clearTimeout(runtime.proxyTimer); runtime.proxyTimer = undefined;
+        imageDiagnostic("result_image_proxy_failed", image, startedAt, { error: "代理 Data URL 加载失败" });
+        markImageFailed(image, runtime);
+      };
+      image.addEventListener("load", proxyLoad, { once: true });
+      image.addEventListener("error", proxyError, { once: true });
+      runtime.proxySrcApplied = true;
+      image.src = response.data_url;
+      runtime.proxyTimer = setTimeout(() => {
+        if (image.dataset.imageState === "loaded" || runtime.proxySettled) return;
+        runtime.proxyFailed = true; runtime.proxySettled = true; runtime.proxyTimer = undefined;
+        imageDiagnostic("result_image_proxy_failed", image, startedAt, { error: "代理 Data URL 加载超时" });
+        markImageFailed(image, runtime);
+      }, 7000);
+      if (image.complete && image.naturalWidth > 0) proxyLoad();
+    }).catch((error) => {
+      if (image.dataset.imageState === "loaded") return;
+      runtime.proxyFailed = true; runtime.proxySettled = true;
+      imageDiagnostic("result_image_proxy_failed", image, startedAt, { error: error?.message || String(error) });
+      markImageFailed(image, runtime);
+    });
+  }
+  function resetResultImage(image, source) {
+    const runtime = imageRuntime(image);
+    clearImageTimers(runtime);
+    image.removeAttribute("src");
+    image.dataset.source = source;
+    image.dataset.imageState = "idle";
+    delete image.dataset.loadingStarted; delete image.dataset.proxyStarted; delete image.dataset.loadedSource;
+    image.__crawlHubImageRuntime = undefined;
+    image.closest(".pic")?.classList.remove("image-failed");
+    setImageStatus(image, "加载图片…");
   }
   function activateResultImage(image) {
-    if (image.dataset.loadingStarted) return;
-    image.dataset.loadingStarted = "true";
-    const startedAt = performance.now(); let timer;
-    const loaded = () => { clearTimeout(timer); setImageStatus(image, "", true); imageDiagnostic("result_image_direct_loaded", image, startedAt); };
-    const failed = () => { clearTimeout(timer); setImageStatus(image, "加载图片…"); imageDiagnostic("result_image_direct_failed", image, startedAt); proxyResultImage(image, startedAt); };
-    image.addEventListener("load", loaded, { once: true }); image.addEventListener("error", failed, { once: true });
+    if (image.dataset.imageState === "loaded" || image.dataset.loadingStarted) return;
+    const startedAt = performance.now(), runtime = imageRuntime(image, startedAt);
+    image.dataset.loadingStarted = "true"; image.dataset.imageState = "direct-loading";
+    setImageStatus(image, "加载图片…");
+    const directLoaded = () => {
+      if (runtime.proxySrcApplied || image.dataset.imageState === "loaded") return;
+      if (lockImageLoaded(image, "direct")) imageDiagnostic("result_image_direct_loaded", image, startedAt);
+    };
+    const directFailed = () => {
+      if (runtime.proxySrcApplied || image.dataset.imageState === "loaded") return;
+      runtime.directFailed = true;
+      imageDiagnostic("result_image_direct_failed", image, startedAt);
+      proxyResultImage(image, startedAt);
+      markImageFailed(image, runtime);
+    };
+    image.addEventListener("load", directLoaded, { once: true });
+    image.addEventListener("error", directFailed, { once: true });
     if (!image.getAttribute("src")) image.src = image.dataset.source;
-    if (image.complete && image.naturalWidth) loaded();
-    else timer = setTimeout(() => { if (!image.complete || !image.naturalWidth) failed(); }, 1000);
+    if (image.complete && image.naturalWidth > 0) directLoaded();
+    runtime.fallbackTimer = setTimeout(() => {
+      if (image.dataset.imageState === "loaded") return;
+      proxyResultImage(image, startedAt);
+    }, 1800);
+    runtime.finalTimer = setTimeout(() => {
+      if (image.dataset.imageState === "loaded") return;
+      if (image.complete && image.naturalWidth > 0) { lockImageLoaded(image, image.dataset.loadedSource || "direct"); return; }
+      if (!runtime.directFailed) runtime.directFailed = true;
+      if (!runtime.proxyStarted) proxyResultImage(image, startedAt);
+      if (!runtime.proxyFailed && runtime.proxyStarted && !runtime.proxySettled) runtime.proxyFailed = true;
+      markImageFailed(image, runtime);
+    }, 9500);
   }
   function setupResultImages() {
     const images = [...panelShadow.querySelectorAll("img[data-result-image]")];
