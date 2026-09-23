@@ -3,8 +3,8 @@
   "name": "CrawlHub - AI 页面结构分析助手",
   "version": "0.1.0",
   "description": "在本地分析当前网页结构，生成可交给 AI 的页面取证报告。",
-  "permissions": ["activeTab", "scripting", "downloads", "storage"],
-  "host_permissions": ["https://*.tiktokcdn.com/*", "https://*.tiktokcdn-eu.com/*", "https://*.ibytedtos.com/*"],
+  "permissions": ["activeTab", "scripting", "downloads", "storage", "cookies"],
+  "host_permissions": ["https://*.tiktokcdn.com/*", "https://*.tiktokcdn-eu.com/*", "https://*.ibytedtos.com/*", "https://*.1688.com/*", "https://*.alicdn.com/*"],
   "background": {
     "service_worker": "service-worker.js"
   },
@@ -13,6 +13,11 @@
       "matches": ["http://*/*", "https://*/*"],
       "js": ["content.js"],
       "run_at": "document_start"
+    },
+    {
+      "matches": ["https://shop.tiktok.com/view/product/*"],
+      "js": ["tiktok-image-search.js"],
+      "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [

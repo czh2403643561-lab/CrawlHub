@@ -1,6 +1,9 @@
 const PROJECTS_STORAGE_KEY = "crawlHub.projects.v1";
 const BINDING_CACHES_STORAGE_KEY = "crawlHub.bindingCaches.v1";
 const BINDING_DEBUG_MODES_STORAGE_KEY = "crawlHub.bindingDebugModes.v1";
+const TIKTOK_IMAGE_SEARCH_ENABLED_STORAGE_KEY = "crawlHub.tiktokImageSearch.enabled.v1";
+
+importScripts("sourcing-1688.js");
 
 async function readProjects() {
   const stored = await chrome.storage.local.get(PROJECTS_STORAGE_KEY);
@@ -28,6 +31,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message?.type?.startsWith("crawlHub:")) return undefined;
 
   (async () => {
+    if (message.type === "crawlHub:read-tiktok-image-search-setting") {
+      const stored = await chrome.storage.local.get(TIKTOK_IMAGE_SEARCH_ENABLED_STORAGE_KEY);
+      return { enabled: Boolean(stored[TIKTOK_IMAGE_SEARCH_ENABLED_STORAGE_KEY]) };
+    }
+    if (message.type === "crawlHub:save-tiktok-image-search-setting") {
+      const enabled = Boolean(message.enabled);
+      await chrome.storage.local.set({ [TIKTOK_IMAGE_SEARCH_ENABLED_STORAGE_KEY]: enabled });
+      return { enabled };
+    }
     if (message.type === "crawlHub:ping") return { connected: true };
     if (message.type === "crawlHub:download-image") {
       const imageUrl = new URL(String(message.url || ""));

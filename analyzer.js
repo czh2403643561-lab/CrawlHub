@@ -4459,6 +4459,7 @@ function installPanel() {
           <div class="product-detail-card">
             <strong id="productDetailTitle">商品采集</strong>
             <p id="productDetailStatus">正在识别当前页面…</p>
+            <label style="display:flex;gap:7px;align-items:flex-start;margin:10px 0;font-size:12px;line-height:1.45;cursor:pointer;"><input id="tiktokImageSearchEnabled" type="checkbox" style="margin-top:2px;" /> <span><b>开启主图搜货</b><br />在商品主图上悬停，可用 1688 官方图搜查找同款货源。</span></label>
             <div id="productDetailIdentity" hidden></div>
             <div id="productDetailSummary" class="product-detail-summary" hidden></div>
           </div>
@@ -4486,6 +4487,7 @@ function installPanel() {
   const bindingModeButton = shadow.querySelector("#bindingMode");
   const productDetailModeButton = shadow.querySelector("#productDetailMode");
   const productDetailStatus = shadow.querySelector("#productDetailStatus");
+  const tiktokImageSearchEnabled = shadow.querySelector("#tiktokImageSearchEnabled");
   const productDetailIdentity = shadow.querySelector("#productDetailIdentity");
   const productDetailSummary = shadow.querySelector("#productDetailSummary");
   const collectProductDetailButton = shadow.querySelector("#collectProductDetail");
@@ -4576,6 +4578,7 @@ function installPanel() {
   let productDetailBusy = false;
   let productDetailResult = null;
   let productDetailProgress = "";
+  let tiktokImageSearchSettingBusy = false;
   let productDetailFailureCount = 0;
   let previousCollectionPageType = null;
   const header = shadow.querySelector("header");
@@ -4930,6 +4933,7 @@ function installPanel() {
     const detected = detectTikTokShopProductPage();
     const hasResult = Boolean(productDetailResult);
     collectProductDetailButton.disabled = productDetailBusy || !detected;
+    tiktokImageSearchEnabled.disabled = tiktokImageSearchSettingBusy;
     collectProductDetailButton.textContent = hasResult ? "重新采集" : "采集并保存商品";
     exportProductDetailButton.disabled = !hasResult || productDetailBusy;
     exportProductDetailDebugButton.disabled = !Array.isArray(window.__crawlHubProductDetailDebugLog) || !window.__crawlHubProductDetailDebugLog.length;
@@ -5422,6 +5426,23 @@ function installPanel() {
   productDetailModeButton.addEventListener("click", () => {
     setMode("product_detail");
   });
+  tiktokImageSearchEnabled.addEventListener("change", async () => {
+    tiktokImageSearchSettingBusy = true;
+    renderProductDetail();
+    try {
+      const saved = await projectStorageRequest("crawlHub:save-tiktok-image-search-setting", { enabled: tiktokImageSearchEnabled.checked });
+      tiktokImageSearchEnabled.checked = Boolean(saved.enabled);
+      setMessage(tiktokImageSearchEnabled.checked ? "已开启主图搜货，悬停商品主图即可搜索。" : "已关闭主图搜货。", "success");
+    } catch (error) {
+      setMessage(`主图搜货设置失败：${error?.message || "无法保存"}`, "error");
+    } finally {
+      tiktokImageSearchSettingBusy = false;
+      renderProductDetail();
+    }
+  });
+  void projectStorageRequest("crawlHub:read-tiktok-image-search-setting")
+    .then((setting) => { tiktokImageSearchEnabled.checked = Boolean(setting.enabled); renderProductDetail(); })
+    .catch(() => { tiktokImageSearchEnabled.checked = false; renderProductDetail(); });
   collectProductDetailButton.addEventListener("click", async () => {
     if (productDetailBusy) return;
     productDetailBusy = true;
