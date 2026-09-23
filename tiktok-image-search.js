@@ -6,6 +6,7 @@
   let hoverHost, hoverShadow, activeImage, hideTimer;
   let panelHost, panelShadow, currentJob, cropMode = false, cropSource = "", firstNotice = false, panelDismissed = false;
   let contextInvalidatedHandled = false;
+  const resultImageHostStats = new Map();
 
   const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
   const escape = (value) => clean(value).replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
@@ -215,9 +216,8 @@
   }
 
   function card(result, index) {
-    const eager = index < 8;
     const image = result.image_url
-      ? `<img src="${escape(result.image_url)}" alt="" loading="${eager ? "eager" : "lazy"}">`
+      ? `<img data-source="${escape(result.image_url)}" src="${escape(result.image_url)}" alt="" decoding="async" referrerpolicy="no-referrer">`
       : '<span class="no-image">暂无图片</span>';
     return `<article class="card" data-offer="${escape(result.offer_id)}" tabindex="0" role="link"><div class="pic"><i class="rank">${index + 1}</i>${image}</div><div class="meta"><h3>${escape(result.title)}</h3><b class="price">${escape(result.price?.display || "—")}</b><div class="facts"><span>销量 ${escape(result.sales || "—")}</span><span>起批 ${escape(result.minimum_order || "—")}</span><span>回头率 ${escape(result.repurchase_rate || "—")}</span>${result.shipping_time ? `<span>发货 ${escape(result.shipping_time)}</span>` : ""}${result.supplier_years ? `<span>店龄 ${escape(result.supplier_years)}</span>` : ""}</div><div class="badges">${result.badges?.length ? result.badges.map((item) => `<em>${escape(item)}</em>`).join("") : ""}</div><footer>${escape(result.supplier_name || "供应商未显示")} <b>↗</b></footer></div></article>`;
   }
@@ -236,20 +236,65 @@
     if (!image && result.image_url && pic) {
       pic.querySelector(".no-image")?.remove();
       const nextImage = document.createElement("img");
-      nextImage.alt = ""; nextImage.loading = index < 8 ? "eager" : "lazy";
+      nextImage.alt = ""; nextImage.decoding = "async"; nextImage.referrerPolicy = "no-referrer";
+      nextImage.dataset.source = result.image_url;
       pic.appendChild(nextImage);
       bindResultImage(nextImage);
       nextImage.src = result.image_url;
+    } else if (image && result.image_url && (image.hidden || pic?.querySelector(".image-error")) && result.image_url !== image.dataset.source) {
+      image.dataset.source = result.image_url;
+      image.hidden = false;
+      image.removeAttribute("data-retry-count");
+      image.removeAttribute("data-image-final-state");
+      pic?.querySelector(".image-error")?.remove();
+      image.src = result.image_url;
     }
+  }
+  function resultImageDetails(image) {
+    const source_url = image.dataset.source || image.currentSrc || image.src || "";
+    let host = "";
+    try { host = new URL(source_url).host; } catch { /* Keep diagnostics usable for malformed URLs. */ }
+    return { offer_id: image.closest(".card")?.dataset.offer || "", host, source_url };
+  }
+  function recordResultImageHost(image, outcome) {
+    if (image.dataset.imageFinalState === outcome) return;
+    image.dataset.imageFinalState = outcome;
+    const { host } = resultImageDetails(image);
+    const stats = resultImageHostStats.get(host) || { loaded: 0, failed: 0 };
+    stats[outcome] += 1;
+    resultImageHostStats.set(host, stats);
+    globalThis.__crawlHub1688ImageHostStats = Object.fromEntries(resultImageHostStats);
+    console.debug("[CrawlHub][1688 image] host stats", globalThis.__crawlHub1688ImageHostStats);
   }
   function bindResultImage(image) {
     if (!image) return;
+    if (!image.dataset.source) image.dataset.source = image.getAttribute("src") || "";
+    image.onload = () => {
+      image.hidden = false;
+      image.closest(".pic")?.querySelector(".image-error")?.remove();
+      const { offer_id, host } = resultImageDetails(image);
+      console.debug("[CrawlHub][1688 image] loaded", { offer_id, host });
+      recordResultImageHost(image, "loaded");
+    };
     image.onerror = () => {
+      const { offer_id, host, source_url } = resultImageDetails(image);
+      if (image.dataset.retryCount !== "1") {
+        image.dataset.retryCount = "1";
+        console.debug("[CrawlHub][1688 image] retry", { offer_id, host });
+        setTimeout(() => {
+          if (!image.isConnected || image.dataset.source !== source_url) return;
+          image.removeAttribute("src");
+          requestAnimationFrame(() => { if (image.isConnected && image.dataset.source === source_url) image.src = source_url; });
+        }, 400);
+        return;
+      }
       image.hidden = true;
       const pic = image.closest(".pic");
       if (pic && !pic.querySelector(".image-error")) {
         const message = document.createElement("span"); message.className = "image-error"; message.textContent = "图片加载失败"; pic.appendChild(message);
       }
+      console.debug("[CrawlHub][1688 image] failed", { offer_id, host, source_url });
+      recordResultImageHost(image, "failed");
     };
   }
   function bindResultCards() {
