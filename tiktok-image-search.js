@@ -5,7 +5,7 @@
   let enabled = false;
   let hoverHost, hoverShadow, activeImage, hideTimer;
   let panelHost, panelShadow, currentJob, cropMode = false, cropSource = "", firstNotice = false, panelDismissed = false;
-  let contextInvalidatedHandled = false;
+  let contextInvalidatedHandled = false, pageIsLeaving = false;
   const resultImageHostStats = new Map();
 
   const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
@@ -17,6 +17,13 @@
   function isExtensionContextInvalidated(error) {
     const message = String(error?.message || error || "");
     return /extension context invalidated/i.test(message) || /context invalidated/i.test(message);
+  }
+  function hasExtensionRuntime() {
+    try {
+      return Boolean(globalThis.chrome?.runtime?.id);
+    } catch {
+      return false;
+    }
   }
   function handleInvalidExtensionContext() {
     if (contextInvalidatedHandled) return;
@@ -30,19 +37,27 @@
     hoverHost?.remove(); hoverHost = hoverShadow = activeImage = undefined;
     panelHost?.remove(); panelHost = panelShadow = undefined;
     currentJob = undefined; cropMode = false; cropSource = ""; panelDismissed = true;
-    console.warn("[CrawlHub] Extension context invalidated, reloading TikTok page.");
+    if (pageIsLeaving || !isProductPage() || document.visibilityState === "hidden") return;
     try {
       const key = "crawlHub.extensionContextReloadAt";
       const lastReload = Number(sessionStorage.getItem(key) || 0);
       if (!lastReload || Date.now() - lastReload >= 10000) {
-        sessionStorage.setItem(key, String(Date.now()));
-        setTimeout(() => location.reload(), 100);
+        setTimeout(() => {
+          if (pageIsLeaving || !isProductPage() || document.visibilityState === "hidden") return;
+          const reloadAt = Number(sessionStorage.getItem(key) || 0);
+          if (!reloadAt || Date.now() - reloadAt >= 10000) {
+            sessionStorage.setItem(key, String(Date.now()));
+            location.reload();
+          }
+        }, 100);
       }
-    } catch (error) {
-      console.error("[CrawlHub] Failed to schedule context recovery", error);
-    }
+    } catch { /* Recovery is best-effort and must not pollute extension errors. */ }
   }
   async function safeRuntimeMessage(message) {
+    if (!hasExtensionRuntime()) {
+      handleInvalidExtensionContext();
+      return { ok: false, context_invalidated: true };
+    }
     try {
       return await chrome.runtime.sendMessage(message);
     } catch (error) {
@@ -55,6 +70,10 @@
     }
   }
   async function safeStorageGet(key) {
+    if (!hasExtensionRuntime()) {
+      handleInvalidExtensionContext();
+      return null;
+    }
     try {
       return await chrome.storage.local.get(key);
     } catch (error) {
@@ -67,6 +86,10 @@
     }
   }
   async function safeStorageSet(values) {
+    if (!hasExtensionRuntime()) {
+      handleInvalidExtensionContext();
+      return false;
+    }
     try {
       await chrome.storage.local.set(values);
       return true;
@@ -178,13 +201,13 @@
     cropMode = false; cropSource = ""; currentJob = undefined; panelDismissed = true;
     if (cancelJob && !contextInvalidatedHandled) void safeRuntimeMessage({ type: "CANCEL_1688_IMAGE_SEARCH" });
   }
-  function stopTikTokImageSearch() {
+  function stopTikTokImageSearch({ cancelJob = true } = {}) {
     enabled = false; clearHideTimer();
     document.removeEventListener("pointerover", handleProductImagePointerOver, true);
     document.removeEventListener("pointerout", handleProductImagePointerOut, true);
     removeEventListener("scroll", syncHoverPosition, true); removeEventListener("resize", syncHoverPosition);
     hoverHost?.remove(); hoverHost = hoverShadow = activeImage = undefined;
-    closeSourcingPanel({ cancelJob: true });
+    closeSourcingPanel({ cancelJob });
   }
 
   function stateText(job) {
@@ -361,19 +384,27 @@
     panelShadow.querySelector("[data-crop-apply]")?.addEventListener("click", () => { const rect = canvas.getBoundingClientRect(), x = Math.min(sx, ex) * canvas.width / rect.width, y = Math.min(sy, ey) * canvas.height / rect.height, width = Math.abs(ex - sx) * canvas.width / rect.width, height = Math.abs(ey - sy) * canvas.height / rect.height; if (width < 20 || height < 20 || !currentJob) return; const output = document.createElement("canvas"); output.width = Math.round(width); output.height = Math.round(height); output.getContext("2d")?.drawImage(canvas, x, y, width, height, 0, 0, output.width, output.height); void startSourcing({ product_id: currentJob.source_product_id, title: currentJob.source_title, image_url: currentJob.source_image_url }, output.toDataURL("image/jpeg", .88)); });
   }
 
-  try {
-    chrome.runtime.onMessage.addListener((message) => {
-      if (message?.type !== "SOURCING_JOB_UPDATED" || !message.job) return;
-      currentJob = message.job;
-      if (currentJob.state !== "cancelled" && !panelDismissed) { ensurePanel(); render(); }
-    });
-    chrome.storage.onChanged.addListener((changes, area) => { if (area === "local" && changes[ENABLED_KEY]) changes[ENABLED_KEY].newValue !== false ? startTikTokImageSearch() : stopTikTokImageSearch(); });
-  } catch (error) {
-    if (isExtensionContextInvalidated(error)) handleInvalidExtensionContext();
-    else console.error("[CrawlHub] Failed to register extension listeners", error);
+  addEventListener("popstate", () => { if (!isProductPage()) stopTikTokImageSearch({ cancelJob: true }); });
+  addEventListener("pagehide", () => {
+    pageIsLeaving = true;
+    stopTikTokImageSearch({ cancelJob: false });
+  });
+
+  if (!hasExtensionRuntime()) {
+    handleInvalidExtensionContext();
+  } else {
+    try {
+      chrome.runtime.onMessage.addListener((message) => {
+        if (message?.type !== "SOURCING_JOB_UPDATED" || !message.job) return;
+        currentJob = message.job;
+        if (currentJob.state !== "cancelled" && !panelDismissed) { ensurePanel(); render(); }
+      });
+      chrome.storage.onChanged.addListener((changes, area) => { if (area === "local" && changes[ENABLED_KEY]) changes[ENABLED_KEY].newValue !== false ? startTikTokImageSearch() : stopTikTokImageSearch({ cancelJob: true }); });
+    } catch (error) {
+      if (isExtensionContextInvalidated(error)) handleInvalidExtensionContext();
+      else console.error("[CrawlHub] Failed to register extension listeners", error);
+    }
   }
-  addEventListener("popstate", () => { if (!isProductPage()) stopTikTokImageSearch(); });
-  addEventListener("pagehide", () => stopTikTokImageSearch());
 
   if (!globalThis.__crawlHubTikTokImageSearchInstalled && isProductPage()) {
     globalThis.__crawlHubTikTokImageSearchInstalled = true;
