@@ -33,7 +33,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
     if (message.type === "crawlHub:read-tiktok-image-search-setting") {
       const stored = await chrome.storage.local.get(TIKTOK_IMAGE_SEARCH_ENABLED_STORAGE_KEY);
-      return { enabled: Boolean(stored[TIKTOK_IMAGE_SEARCH_ENABLED_STORAGE_KEY]) };
+      return { enabled: stored[TIKTOK_IMAGE_SEARCH_ENABLED_STORAGE_KEY] !== false };
     }
     if (message.type === "crawlHub:save-tiktok-image-search-setting") {
       const enabled = Boolean(message.enabled);
