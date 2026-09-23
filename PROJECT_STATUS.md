@@ -50,11 +50,14 @@
 - Skill 数据源同步新增当前浏览器会话内的专用事件日志 `window.__crawlHubSkillSyncLog`，商品绑定面板可导出 `crawlHub-skill-sync-时间.json`；日志只包含同步阶段、数量、目录名和固定目标文件，不写入仓库。
 - 新增独立“商品采集”顶级 Tab：仅识别 `shop.tiktok.com/view/product/<数字 ID>` 且具有商品标题的前台商品详情页。素材包 V1 从当前 DOM 采集基础信息、顶部轮播、属性表与商品描述，并保存到 `data/tiktok_products/<product_id>/product.json` 及图片子目录；本轮不调用 SKU，不调用 TikTok API，不影响现有三项功能或既有导出结构。
 - 商品采集复用已关联 CrawlHub 项目目录，支持通过扩展后台桥下载 TikTok 商品 CDN 图片；图片失败保留 `source_url` 并将 `local_path` 写为 `null`，`product.json` 最后写入并回读校验后才显示完成。新增 `window.__crawlHubProductDetailDebugLog` 与调试日志导出。
+- 根据真实商品 `1729864263782341351` 的 22 张图片全部“未收到图片数据”日志，已将图片桥从 ArrayBuffer 改为分块 Base64；页面端解码后校验数据长度，文件写入后再次校验实际大小，并记录 `image_download_received`、`image_write_verified`。
+- 商品素材 basic 字段已简化为 title、sold、seller、rating、review_count；不再采集或显示 price、currency、original_price、discount，也不调用 SKU 流程。
 
 ## 问题
 
 - 当前浏览器没有可用的已登录 TikTok Seller Center 页面，尚未完成六榜真实页面逐一采集、导出及扩展重载恢复验证，也未完成统一滚动引擎的真实长列表扫描和商品绑定定位打开验证；短视频与达人独立采样已确认视频封面和达人头像结构，但未提供视频播放地址、达人名称或主页 href/data-url。
 - TikTok Shop 前台商品页在自动验证时出现安全检查，未绕过该页面；商品采集尚待用户可正常访问的真实商品页完成端到端验证。
+- 最新真实测试确认目录和 `product.json` 正常，但 22 张图片均未落盘；本轮 Base64 修复尚待用户重载扩展后复测文件真实大小和可打开性。
 
 ## 下一步
 
@@ -62,3 +65,4 @@
 - 商品绑定扫描新增暂停/继续控制：暂停时保留当前页面会话索引与已发现数量，继续时从当前滚动位置恢复，不清空、不回顶、不重启。
 - 建议先关联真实 CrawlHub 项目根目录并完成一次扫描，确认固定 `data/product_opportunity_keywords.json` 自动更新；再扫描一次验证新增/移除/数据变化摘要与自动同步。批量提报仍建议先用 5–10 条任务验证缓存定位恢复、已绑定晚出现、主表恢复、2 秒冷却与结果/批量调试日志是否一致。
 - 在可正常打开的 `shop.tiktok.com/view/product/...` 商品页重载扩展后，进入“商品采集”执行一次素材包保存；核对商品 ID、标题、价格、轮播/详情图片、本地路径、属性和描述文本，不测试 SKU。
+- 重载扩展后复测商品 `1729864263782341351`：确认 `gallery/`、`description/` 图片真实存在且可打开，`product.json` 中成功图片的 `local_path` 与文件一致；不测试价格和 SKU。

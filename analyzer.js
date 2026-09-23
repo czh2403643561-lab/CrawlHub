@@ -3928,40 +3928,12 @@ function tiktokProductText(element) {
   return compactOpportunityText(element?.innerText || element?.textContent || "");
 }
 
-function tiktokProductCurrencyPrice(text) {
-  const compact = String(text || "").replace(/\s+/g, "");
-  const match = compact.match(/([£$€¥]|[A-Z]{3})([\d,.]+(?:\.\d{1,2})?)/);
-  if (!match) return null;
-  const currency = match[1];
-  const amount = match[2].replace(/,/g, "");
-  return { currency, price: `${currency}${amount}` };
-}
-
-function tiktokProductCommerceRegion(titleElement) {
-  const currencyPattern = /(?:[£$€¥]\s*[\d]|\b[A-Z]{3}\s*[\d])/;
+function tiktokProductBasicRegion(titleElement) {
   for (let current = titleElement?.parentElement, depth = 0; current && current !== document.body && depth < 8; current = current.parentElement, depth += 1) {
     const text = tiktokProductText(current);
-    if (currencyPattern.test(text) && text.length <= 5000) return current;
+    if (/(?:Sold by|已售|reviews?|评价|★|⭐)/i.test(text) && text.length <= 5000) return current;
   }
   return titleElement?.parentElement || null;
-}
-
-function tiktokProductPriceCandidates(titleElement) {
-  const titleRect = titleElement.getBoundingClientRect();
-  const region = tiktokProductCommerceRegion(titleElement);
-  const candidates = Array.from(region?.querySelectorAll("*") || [])
-    .filter(isVisiblePageElement)
-    .map((element) => ({ element, text: tiktokProductText(element) }))
-    .filter(({ element, text }) => text.length <= 80 && /(?:[£$€¥]\s*[\d]|\b[A-Z]{3}\s*[\d])/.test(text))
-    .map(({ element, text }) => ({ element, text, parsed: tiktokProductCurrencyPrice(text), rect: element.getBoundingClientRect() }))
-    .filter((candidate) => candidate.parsed && candidate.rect.top <= titleRect.bottom + 320 && candidate.rect.bottom >= Math.max(0, titleRect.top - 360))
-    .sort((left, right) => left.rect.top - right.rect.top || left.rect.left - right.rect.left);
-  const seen = new Set();
-  return candidates.filter((candidate) => {
-    if (seen.has(candidate.parsed.price)) return false;
-    seen.add(candidate.parsed.price);
-    return true;
-  });
 }
 
 function tiktokProductImageSource(image) {
@@ -4141,23 +4113,16 @@ function tiktokProductCommerceLines(region) {
   return String(region?.innerText || "").split(/\r?\n/).map((line) => compactOpportunityText(line)).filter(Boolean);
 }
 
-function tiktokProductCommerceBasic(titleElement, prices) {
-  const region = tiktokProductCommerceRegion(titleElement);
+function tiktokProductCommerceBasic(titleElement) {
+  const region = tiktokProductBasicRegion(titleElement);
   const text = tiktokProductText(region);
   const lines = tiktokProductCommerceLines(region);
-  const currentPrice = prices[0]?.parsed || null;
-  const originalPrice = prices.slice(1).map((item) => item.parsed).find((item) => item && item.price !== currentPrice?.price) || null;
   const sellerLine = lines.find((line) => /^(?:Sold by|由)\b/i.test(line));
   const ratingMatch = text.match(/\b([0-5](?:\.\d)?)\s*[★⭐]/);
   const reviewMatch = text.match(/\b([\d,.]+)\s*(?:reviews?|评价)\b/i) || text.match(/\b[0-5](?:\.\d)?\s*[★⭐]\s*([\d,.]+)/);
   const soldMatch = text.match(/(?:已售|sold)\s*([\d,.]+\s*[kKmM万]?)/i);
-  const discountMatch = text.match(/(?:-\s*\d+\s*%|\d+\s*%\s*off)/i);
   return {
     title: titleElement ? tiktokProductText(titleElement) : null,
-    price: currentPrice?.price || null,
-    currency: currentPrice?.currency || null,
-    original_price: originalPrice?.price || null,
-    discount: discountMatch?.[0]?.replace(/\s+/g, "") || null,
     rating: ratingMatch?.[1] || null,
     review_count: reviewMatch?.[1] || null,
     sold: soldMatch?.[1] || null,
@@ -4172,9 +4137,8 @@ async function collectTikTokShopProductDetail() {
   addTikTokProductDetailDebugLog("page_detected", { product_id: detected.product_id });
   try {
     addTikTokProductDetailDebugLog("basic_collect_start");
-    const prices = tiktokProductPriceCandidates(detected.title_element);
-    const basic = tiktokProductCommerceBasic(detected.title_element, prices);
-    addTikTokProductDetailDebugLog("basic_collect_complete", { title: Boolean(basic.title), price: basic.price });
+    const basic = tiktokProductCommerceBasic(detected.title_element);
+    addTikTokProductDetailDebugLog("basic_collect_complete", { title: Boolean(basic.title) });
     const galleryInfo = tiktokProductFindGallery();
     addTikTokProductDetailDebugLog("gallery_detected", { count: galleryInfo.gallery.length, unique_count: galleryInfo.gallery_unique_count });
     const attributes = tiktokProductAttributes();
@@ -4222,6 +4186,14 @@ function tiktokProductImageLogDetails(item, type, extra = {}) {
   return { index: item.index, type, host: tiktokProductImageHost(item.source_url), local_path: item.local_path || null, ...extra };
 }
 
+function tiktokProductBase64ToBytes(base64) {
+  if (typeof base64 !== "string" || !base64) throw new Error("未收到图片数据");
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
 async function writeTikTokProductJson(directory, payload) {
   const fileHandle = await directory.getFileHandle("product.json", { create: true });
   const writable = await fileHandle.createWritable();
@@ -4254,15 +4226,34 @@ async function saveTikTokShopProductDetail(result, onProgress = () => { }) {
     addTikTokProductDetailDebugLog("image_download_start", tiktokProductImageLogDetails(item, type));
     try {
       const downloaded = await projectStorageRequest("crawlHub:download-image", { url: item.source_url });
-      if (!downloaded.data || typeof downloaded.data.byteLength !== "number" || !downloaded.data.byteLength) throw new Error("未收到图片数据");
+      const bytes = tiktokProductBase64ToBytes(downloaded.base64);
+      const expectedBytes = Number(downloaded.byte_length);
+      if (!bytes.byteLength || (Number.isFinite(expectedBytes) && bytes.byteLength !== expectedBytes)) {
+        throw new Error(`图片数据大小校验失败：收到 ${bytes.byteLength}，预期 ${expectedBytes || 0}`);
+      }
+      addTikTokProductDetailDebugLog("image_download_received", {
+        index: item.index,
+        type,
+        content_type: downloaded.content_type || "",
+        byte_length: bytes.byteLength
+      });
       const extension = tiktokProductImageExtension(item.source_url, downloaded.content_type);
       const filename = `${String(item.index).padStart(2, "0")}${extension}`;
       const fileHandle = await directory.getFileHandle(filename, { create: true });
       const writable = await fileHandle.createWritable();
-      await writable.write(new Blob([downloaded.data], { type: downloaded.content_type || "application/octet-stream" }));
+      await writable.write(new Blob([bytes], { type: downloaded.content_type || "application/octet-stream" }));
       await writable.close();
+      const savedFile = await fileHandle.getFile();
+      if (!savedFile.size || savedFile.size !== bytes.byteLength) throw new Error(`图片写入后大小校验失败：保存 ${savedFile.size}，预期 ${bytes.byteLength}`);
       item.local_path = `${type}/${filename}`;
-      addTikTokProductDetailDebugLog("image_download_success", tiktokProductImageLogDetails(item, type));
+      addTikTokProductDetailDebugLog("image_write_verified", tiktokProductImageLogDetails(item, type, {
+        expected_bytes: bytes.byteLength,
+        saved_bytes: savedFile.size
+      }));
+      addTikTokProductDetailDebugLog("image_download_success", tiktokProductImageLogDetails(item, type, {
+        expected_bytes: bytes.byteLength,
+        saved_bytes: savedFile.size
+      }));
     } catch (error) {
       item.local_path = null;
       const details = tiktokProductImageLogDetails(item, type, { error: error?.message || "图片保存失败" });
@@ -4948,7 +4939,13 @@ function installPanel() {
       productDetailSummary.hidden = true;
       return;
     }
-    productDetailStatus.textContent = productDetailBusy ? (productDetailProgress || "正在读取商品信息…") : hasResult ? "✓ 商品采集完成" : "✓ 已识别 TikTok Shop 商品页";
+    const totalImages = (productDetailResult?.gallery?.length || 0) + (productDetailResult?.description?.images?.length || 0);
+    const statusAfterSave = productDetailFailureCount === totalImages && totalImages > 0
+      ? `商品信息已保存，图片保存失败：${productDetailFailureCount} 张`
+      : productDetailFailureCount
+      ? `商品已保存，但有图片保存失败：${productDetailFailureCount} 张`
+      : "✓ 商品采集完成";
+    productDetailStatus.textContent = productDetailBusy ? (productDetailProgress || "正在读取商品信息…") : hasResult ? statusAfterSave : "✓ 已识别 TikTok Shop 商品页";
     productDetailIdentity.hidden = false;
     productDetailIdentity.textContent = `商品 ID：${detected.product_id}\n标题：${detected.title}`;
     productDetailSummary.hidden = !hasResult;
@@ -5442,9 +5439,13 @@ function installPanel() {
       });
       productDetailResult = saved.product;
       productDetailFailureCount = saved.failures.length;
-      setMessage(productDetailFailureCount
-        ? `商品采集完成，但有 ${productDetailFailureCount} 张图片保存失败。\n已保存：${saved.total_images - productDetailFailureCount} / ${saved.total_images}`
-        : `商品采集完成，已保存到 data/tiktok_products/${productDetailResult.product_id}/。`, "success");
+      if (productDetailFailureCount === saved.total_images && saved.total_images > 0) {
+        setMessage(`商品信息已保存\n图片保存失败：${productDetailFailureCount} 张`, "error");
+      } else if (productDetailFailureCount) {
+        setMessage(`商品已保存，但有图片保存失败\n图片已保存：${saved.total_images - productDetailFailureCount} / ${saved.total_images}\n失败：${productDetailFailureCount} 张`, "error");
+      } else {
+        setMessage(`商品采集完成，已保存到 data/tiktok_products/${productDetailResult.product_id}/。`, "success");
+      }
     } catch (error) {
       addTikTokProductDetailDebugLog("collection_failed", { message: error?.message || "保存失败" });
       setMessage(`商品采集失败：${error?.message || "无法读取页面信息"}`, "error");

@@ -12,6 +12,18 @@ async function readStorageMap(key) {
   return stored[key] || {};
 }
 
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    const end = Math.min(offset + 0x8000, bytes.length);
+    let chunk = "";
+    for (let index = offset; index < end; index += 1) chunk += String.fromCharCode(bytes[index]);
+    binary += chunk;
+  }
+  return btoa(binary);
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message?.type?.startsWith("crawlHub:")) return undefined;
 
@@ -24,7 +36,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       const response = await fetch(imageUrl.href, { credentials: "omit" });
       if (!response.ok) throw new Error(`图片下载失败（HTTP ${response.status}）`);
-      return { data: await response.arrayBuffer(), content_type: response.headers.get("content-type") || "" };
+      const buffer = await response.arrayBuffer();
+      return {
+        base64: arrayBufferToBase64(buffer),
+        content_type: response.headers.get("content-type") || "",
+        byte_length: buffer.byteLength
+      };
     }
     if (message.type === "crawlHub:download-batch-template") {
       const response = await fetch(chrome.runtime.getURL("templates/CrawlHub_批量提报模板.csv"));
