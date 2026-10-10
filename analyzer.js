@@ -1643,7 +1643,7 @@ const BATCH_DEBUG_EVENT_NAMES = {
   locate_fallback_failed: "locate_fallback_failed",
   binding_opened: "binding_opened",
   step_one_ready: "step_one_ready",
-  product_title_written: "product_title_written",
+  product_id_written: "product_id_written",
   search_click_dispatched: "search_clicked",
   search_result_changed: "search_result_changed",
   product_found: "product_found",
@@ -1691,7 +1691,7 @@ const BATCH_BUSINESS_STEPS = new Set([
   "locate_fallback_failed",
   "binding_opened",
   "step_one_ready",
-  "product_title_written",
+  "product_id_written",
   "search_clicked",
   "search_result_changed",
   "target_product_found",
@@ -1738,8 +1738,7 @@ function getBatchDebugItem() {
     item = {
       index: context.batch_index,
       keyword: context.keyword,
-      title: context.title,
-      matched_product_id: context.matched_product_id || null,
+      product_id: context.product_id,
       started_at: new Date().toISOString(),
       finished_at: null,
       duration_ms: null,
@@ -1753,14 +1752,6 @@ function getBatchDebugItem() {
     log.items.push(item);
   }
   return item;
-}
-
-function setBatchDebugMatchedProductId(matchedProductId) {
-  const context = window.__crawlHubAutoReportDebugContext;
-  if (!context || typeof context !== "object") return;
-  context.matched_product_id = matchedProductId || null;
-  const item = window.__crawlHubBatchDebugLog?.items?.find((candidate) => candidate.index === context.batch_index);
-  if (item) item.matched_product_id = context.matched_product_id;
 }
 
 function addBatchDebugEvent(step, details = {}) {
@@ -1833,30 +1824,10 @@ function didAutoReportProductResultsChange(before, after) {
   return Boolean(before && after && (before.visible_row_count !== after.visible_row_count || before.signature !== after.signature));
 }
 
-function normalizeProductTitle(value) {
-  return String(value ?? "").normalize("NFKC").replace(/\s+/g, " ").trim();
-}
-
-function rowContainsExactProductTitle(row, productTitle) {
-  const normalizedTitle = normalizeProductTitle(productTitle);
-  if (!row || !normalizedTitle) return false;
-  const exactElements = Array.from(row.querySelectorAll("*"))
-    .filter(isVisiblePageElement)
-    .filter((element) => normalizeProductTitle(element.innerText || element.textContent || "") === normalizedTitle);
-  return exactElements.some((element) => !Array.from(element.children)
-    .some((child) => isVisiblePageElement(child)
-      && normalizeProductTitle(child.innerText || child.textContent || "") === normalizedTitle));
-}
-
-function extractProductIdFromTargetRow(row) {
-  const ids = compactOpportunityText(row?.innerText || row?.textContent || "").match(/\b\d{12,24}\b/g) || [];
-  return ids[0] || null;
-}
-
-function findVisibleTargetProductRowsByTitle(drawerRoot, productTitle) {
+function findVisibleTargetProductRows(drawerRoot, productId) {
   return Array.from(drawerRoot?.querySelectorAll("tr") || [])
     .filter(isVisiblePageElement)
-    .filter((row) => rowContainsExactProductTitle(row, productTitle));
+    .filter((row) => rowContainsCompleteProductId(row, productId));
 }
 
 function hasVisibleAutoReportLoading(drawerRoot) {
@@ -1864,15 +1835,14 @@ function hasVisibleAutoReportLoading(drawerRoot) {
     .some(isVisiblePageElement);
 }
 
-async function waitForTargetProductRowSettledByTitle(drawerRoot, productTitle, { timeout = 30000, interval = 250 } = {}) {
-  addAutoReportDebugLog("target_row_settle_start", { title: productTitle });
+async function waitForTargetProductRowSettled(drawerRoot, productId, { timeout = 30000, interval = 250 } = {}) {
+  addAutoReportDebugLog("target_row_settle_start", { product_id: productId });
   const deadline = Date.now() + timeout;
   let previousRow = null;
   let previousSignature = "";
   let stableSamples = 0;
   while (Date.now() < deadline) {
-    const rows = findVisibleTargetProductRowsByTitle(drawerRoot, productTitle);
-    if (rows.length > 1) throw new Error("检测到多个同名商品，无法安全确认目标商品。");
+    const rows = findVisibleTargetProductRows(drawerRoot, productId);
     const row = rows.length === 1 ? rows[0] : null;
     const signature = row ? compactOpportunityText(row.innerText || row.textContent || "") : "";
     const loadingDetected = hasVisibleAutoReportLoading(drawerRoot);
@@ -1882,7 +1852,7 @@ async function waitForTargetProductRowSettledByTitle(drawerRoot, productTitle, {
       && signature === previousSignature;
     stableSamples = unchanged ? stableSamples + 1 : row && !loadingDetected ? 1 : 0;
     addAutoReportDebugLog("target_row_settle_sample", {
-      title: productTitle,
+      product_id: productId,
       signature,
       sample_count: stableSamples,
       loading_detected: loadingDetected,
@@ -1890,7 +1860,7 @@ async function waitForTargetProductRowSettledByTitle(drawerRoot, productTitle, {
     });
     if (row && !loadingDetected && stableSamples >= 3) {
       addAutoReportDebugLog("target_row_settled", {
-        title: productTitle,
+        product_id: productId,
         signature,
         sample_count: stableSamples,
         loading_detected: loadingDetected
@@ -1902,7 +1872,7 @@ async function waitForTargetProductRowSettledByTitle(drawerRoot, productTitle, {
     await waitForPageUpdate(interval);
   }
   addAutoReportDebugLog("target_row_settle_timeout", {
-    title: productTitle,
+    product_id: productId,
     signature: previousSignature,
     sample_count: stableSamples,
     loading_detected: hasVisibleAutoReportLoading(drawerRoot)
@@ -2064,6 +2034,12 @@ function hasExplicitEmptyProductResults(drawerRoot) {
     if (!/^(?:暂无数据|暂无商品|未找到相关商品|no data|no results)$/i.test(text)) return false;
     return !Array.from(element.children).some((child) => compactOpportunityText(child.innerText || child.textContent || "") === text);
   });
+}
+
+function rowContainsCompleteProductId(row, productId) {
+  const escapedId = productId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const completeId = new RegExp(`(^|[^0-9A-Za-z_-])${escapedId}(?=$|[^0-9A-Za-z_-])`);
+  return completeId.test(compactOpportunityText(row.innerText || row.textContent || ""));
 }
 
 function findRowCheckboxControl(row) {
@@ -2265,19 +2241,16 @@ function parseBatchReportCsv(text) {
   if (!nonBlankRows.length) throw new Error("CSV 文件为空。");
   const headers = nonBlankRows[0].map((header) => String(header || "").trim().toLowerCase());
   const keywordIndex = headers.indexOf("keyword");
-  const titleIndex = headers.indexOf("title");
-  if (keywordIndex < 0 || titleIndex < 0) {
-    if (headers.includes("product_id")) throw new Error("当前批量提报模板已改为 keyword + title，请下载最新模板。");
-    throw new Error("CSV 必须包含 keyword 和 title 字段。");
-  }
+  const productIdIndex = headers.indexOf("product_id");
+  if (keywordIndex < 0 || productIdIndex < 0) throw new Error("CSV 必须包含 keyword 和 product_id 字段。");
   const tasks = [];
   nonBlankRows.slice(1).forEach((cells, index) => {
     const lineNumber = index + 2;
     const keyword = String(cells[keywordIndex] || "").trim();
-    const title = String(cells[titleIndex] || "").trim();
+    const productId = String(cells[productIdIndex] || "").trim().replace(/^'/, "").trim();
     if (!keyword) throw new Error(`第 ${lineNumber} 行 keyword 为空。`);
-    if (!title) throw new Error(`第 ${lineNumber} 行 title 为空。`);
-    tasks.push({ keyword, title, status: "pending", error: "" });
+    if (!/^\d+$/.test(productId)) throw new Error(`第 ${lineNumber} 行 product_id 必须为纯数字。`);
+    tasks.push({ keyword, product_id: productId, status: "pending", error: "" });
   });
   if (!tasks.length) throw new Error("CSV 中没有可执行任务。");
   return tasks;
@@ -2288,10 +2261,10 @@ function batchReportResultsCsv(tasks) {
     const text = String(value ?? "");
     return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   };
-  return ["index,keyword,title,status,error", ...tasks.map((task, index) => [index + 1, task.keyword, task.title, task.status, task.error].map(escapeCell).join(","))].join("\r\n");
+  return ["index,keyword,product_id,status,error", ...tasks.map((task, index) => [index + 1, task.keyword, task.product_id, task.status, task.error].map(escapeCell).join(","))].join("\r\n");
 }
 
-async function runSingleProductAutoReport(keyword, productTitle, onStatus = null, { deferBatchRecovery = false } = {}) {
+async function runSingleProductAutoReport(keyword, productId, onStatus = null, { deferBatchRecovery = false } = {}) {
   const session = window.__crawlHubBindingSession;
   if (!session || session.state !== "completed") throw new Error("请先完成商品机会扫描。");
   const updateStatus = (message) => {
@@ -2309,12 +2282,13 @@ async function runSingleProductAutoReport(keyword, productTitle, onStatus = null
   if (!searchInput) throw new Error("商品选择页面尚未加载完成，请稍后重试。");
   addAutoReportDebugLog("input_found", { input: describeAutoReportElement(searchInput), input_value: searchInput.value });
 
-  updateStatus("正在输入商品标题...");
-  setNativeInputValue(searchInput, productTitle);
-  if (searchInput.value !== productTitle) throw new Error("商品标题未能写入搜索框，请重试。");
-  addAutoReportDebugLog("product_title_written", { title: searchInput.value });
+  updateStatus("正在输入商品 ID...");
+  setNativeInputValue(searchInput, productId);
+  if (searchInput.value !== productId) throw new Error("商品 ID 未能写入搜索框，请重试。");
+  addAutoReportDebugLog("product_id_written", { input_value: searchInput.value });
   let searchAttempt = 0;
   let searchBaseline = null;
+  let searchResultChanged = false;
   const loggedChangeSignatures = new Set();
   const triggerProductSearch = (currentInput) => {
     const stepOneRoot = findAutoReportStepOneRoot(currentInput);
@@ -2339,6 +2313,7 @@ async function runSingleProductAutoReport(keyword, productTitle, onStatus = null
     if (!stepOneRoot) return null;
     const snapshot = getAutoReportProductResultsSnapshot(stepOneRoot);
     if (didAutoReportProductResultsChange(searchBaseline, snapshot)) {
+      searchResultChanged = true;
       const signature = `${searchAttempt}:${snapshot.visible_row_count}:${snapshot.signature}`;
       if (!loggedChangeSignatures.has(signature)) {
         loggedChangeSignatures.add(signature);
@@ -2346,14 +2321,9 @@ async function runSingleProductAutoReport(keyword, productTitle, onStatus = null
       }
     }
     const rows = Array.from(stepOneRoot.querySelectorAll("tr")).filter(isVisiblePageElement);
-    const matches = rows.filter((row) => rowContainsExactProductTitle(row, productTitle));
+    const matches = rows.filter((row) => rowContainsCompleteProductId(row, productId));
     if (matches.length) {
-      addAutoReportDebugLog("product_found", {
-        attempt: searchAttempt,
-        title: productTitle,
-        matched_product_id: matches.length === 1 ? extractProductIdFromTargetRow(matches[0]) : null,
-        match_count: matches.length
-      });
+      addAutoReportDebugLog("product_found", { attempt: searchAttempt, product_id: productId, match_count: matches.length });
       return { matches };
     }
     return hasExplicitEmptyProductResults(stepOneRoot) ? { empty: true } : null;
@@ -2361,59 +2331,64 @@ async function runSingleProductAutoReport(keyword, productTitle, onStatus = null
   updateStatus("正在搜索商品...");
   triggerProductSearch(searchInput);
   let searchResult = await waitForDomState(readMatchingRows, { timeout: 30000 });
-  if (searchResult?.empty) throw new Error("商品搜索结果中没有找到完整标题匹配的商品。");
+  if (searchResult?.empty) throw new Error("商品搜索结果中没有此商品 ID。");
   let matchingRows = searchResult?.matches || null;
   if (!matchingRows) {
     const currentInput = document.getElementById("search_content_input");
     const stillOnStepOne = isAutoReportStillOnStepOne();
     if (stillOnStepOne && currentInput && isVisiblePageElement(currentInput)) {
-      if (currentInput.value === productTitle) {
+      if (currentInput.value === productId) {
         triggerProductSearch(currentInput);
         searchResult = await waitForDomState(readMatchingRows, { timeout: 30000 });
-        if (searchResult?.empty) throw new Error("商品搜索结果中没有找到完整标题匹配的商品。");
+        if (searchResult?.empty) throw new Error("商品搜索结果中没有此商品 ID。");
         matchingRows = searchResult?.matches || null;
       }
     }
   }
   if (!matchingRows) {
-    throw new Error("商品搜索结果中没有找到完整标题匹配的商品。");
+    if (!searchResultChanged) throw new Error("商品搜索未生效，请手动点击右侧放大镜后重试。");
+    throw new Error("商品搜索结果中没有此商品 ID。");
   }
-  if (matchingRows.length !== 1) throw new Error("检测到多个同名商品，无法安全确认目标商品。");
+  if (matchingRows.length !== 1) throw new Error("商品 ID 匹配到多条结果，请确认后重试。");
 
   let targetRow = matchingRows[0];
-  let matchedProductId = extractProductIdFromTargetRow(targetRow);
-  setBatchDebugMatchedProductId(matchedProductId);
-  addAutoReportDebugLog("target_product_found", { title: productTitle, matched_product_id: matchedProductId });
-  targetRow = await waitForTargetProductRowSettledByTitle(readyDrawer.drawer_root, productTitle, { timeout: 30000 });
-  if (!targetRow) throw new Error("商品搜索结果中没有找到完整标题匹配的商品。");
+  addAutoReportDebugLog("target_product_found", { product_id: productId });
+  targetRow = await waitForTargetProductRowSettled(readyDrawer.drawer_root, productId, { timeout: 30000 });
+  if (!targetRow) throw new Error("商品搜索结果尚未稳定，请重试。");
   const refreshUniqueTargetRow = () => {
     const currentInput = document.getElementById("search_content_input");
     const stepOneRoot = currentInput && isVisiblePageElement(currentInput) ? findAutoReportStepOneRoot(currentInput) : null;
     const currentRows = Array.from(stepOneRoot?.querySelectorAll("tr") || []).filter(isVisiblePageElement);
-    const currentMatches = currentRows.filter((row) => rowContainsExactProductTitle(row, productTitle));
-    if (currentMatches.length > 1) throw new Error("检测到多个同名商品，无法安全确认目标商品。");
+    const currentMatches = currentRows.filter((row) => rowContainsCompleteProductId(row, productId));
     if (currentMatches.length === 1) {
       targetRow = currentMatches[0];
-      matchedProductId = extractProductIdFromTargetRow(targetRow);
-      setBatchDebugMatchedProductId(matchedProductId);
       return targetRow;
     }
     return null;
   };
-  const findCurrentTargetRow = () => refreshUniqueTargetRow();
+  const findCurrentTargetRow = () => {
+    const refreshedRow = refreshUniqueTargetRow();
+    if (refreshedRow) return refreshedRow;
+    return targetRow instanceof Element
+      && document.documentElement.contains(targetRow)
+      && isVisiblePageElement(targetRow)
+      && rowContainsCompleteProductId(targetRow, productId)
+      ? targetRow
+      : null;
+  };
   const findAlreadyBoundState = () => {
     const currentTargetRow = findCurrentTargetRow();
     return currentTargetRow ? findVisibleExactTextElement("已绑定", currentTargetRow) : null;
   };
   const skipAlreadyBound = async (source) => {
-    addAutoReportDebugLog("product_already_bound", { title: productTitle, matched_product_id: matchedProductId, source });
+    addAutoReportDebugLog("product_already_bound", { product_id: productId, source });
     updateStatus("商品已绑定，正在关闭...");
     const drawerRoot = findAutoReportStepOneDrawerRoot();
     if (!drawerRoot) throw createAlreadyBoundSystemError("已识别商品已绑定，但未找到当前提报窗口。");
     if (!clickAutoReportDrawerCloseIcon(drawerRoot)) throw createAlreadyBoundSystemError("已识别商品已绑定，但未找到右上角关闭图标。");
     if (deferBatchRecovery) {
       updateStatus("商品已绑定，已跳过。");
-      return { keyword, title: productTitle, matched_product_id: matchedProductId, skipped: true, skip_reason: "商品已绑定", recovery_pending: true };
+      return { keyword, product_id: productId, skipped: true, skip_reason: "商品已绑定", recovery_pending: true };
     }
     try {
       await waitForBatchOpportunityRecovery();
@@ -2421,29 +2396,29 @@ async function runSingleProductAutoReport(keyword, productTitle, onStatus = null
       throw createAlreadyBoundSystemError(error?.message || "已绑定商品关闭后页面未恢复。");
     }
     updateStatus("商品已绑定，已跳过。");
-    return { keyword, title: productTitle, matched_product_id: matchedProductId, skipped: true, skip_reason: "商品已绑定" };
+    return { keyword, product_id: productId, skipped: true, skip_reason: "商品已绑定" };
   };
   const recheckAlreadyBound = async (reason) => {
-    addAutoReportDebugLog("already_bound_recheck_start", { title: productTitle, matched_product_id: matchedProductId, reason });
+    addAutoReportDebugLog("already_bound_recheck_start", { product_id: productId, reason });
     const boundState = await waitForDomState(findAlreadyBoundState, { timeout: 3000, interval: 200 });
     if (boundState) {
-      addAutoReportDebugLog("already_bound_recheck_found", { title: productTitle, matched_product_id: matchedProductId, reason });
+      addAutoReportDebugLog("already_bound_recheck_found", { product_id: productId, reason });
       return true;
     }
-    addAutoReportDebugLog("already_bound_recheck_timeout", { title: productTitle, matched_product_id: matchedProductId, reason });
+    addAutoReportDebugLog("already_bound_recheck_timeout", { product_id: productId, reason });
     return false;
   };
   const initiallyBound = findAlreadyBoundState();
-  addAutoReportDebugLog("already_bound_first_check", { title: productTitle, matched_product_id: matchedProductId, found: Boolean(initiallyBound) });
+  addAutoReportDebugLog("already_bound_first_check", { product_id: productId, found: Boolean(initiallyBound) });
   if (initiallyBound) return skipAlreadyBound("first_check");
 
-  addAutoReportDebugLog("checkbox_pre_click_buffer_start", { title: productTitle, matched_product_id: matchedProductId, buffer_ms: 800 });
+  addAutoReportDebugLog("checkbox_pre_click_buffer_start", { product_id: productId, buffer_ms: 800 });
   await waitForPageUpdate(800);
-  addAutoReportDebugLog("checkbox_pre_click_buffer_finished", { title: productTitle, matched_product_id: matchedProductId, buffer_ms: 800 });
+  addAutoReportDebugLog("checkbox_pre_click_buffer_finished", { product_id: productId, buffer_ms: 800 });
   targetRow = refreshUniqueTargetRow();
   if (!targetRow) {
     if (await recheckAlreadyBound("target_row_changed_after_buffer")) return skipAlreadyBound("target_row_changed_after_buffer");
-    throw new Error("商品搜索结果中没有找到完整标题匹配的商品。");
+    throw new Error("商品搜索结果已变化，请重试。");
   }
   let checkbox = findRowCheckboxControl(targetRow);
   if (!checkbox) {
@@ -2457,13 +2432,13 @@ async function runSingleProductAutoReport(keyword, productTitle, onStatus = null
     throw new Error("该商品暂时无法勾选。");
   }
   if (findAlreadyBoundState()) {
-    addAutoReportDebugLog("already_bound_recheck_found", { title: productTitle, matched_product_id: matchedProductId, reason: "before_checkbox_click" });
+    addAutoReportDebugLog("already_bound_recheck_found", { product_id: productId, reason: "before_checkbox_click" });
     return skipAlreadyBound("before_checkbox_click");
   }
   targetRow = refreshUniqueTargetRow();
   checkbox = targetRow ? findRowCheckboxControl(targetRow) : null;
   if (!checkbox || !isAvailableRowCheckboxControl(checkbox)) {
-    if (!checkbox) addAutoReportDebugLog("checkbox_click_failed", { title: productTitle, matched_product_id: matchedProductId, attempt: 1, reason: "checkbox_changed" });
+    if (!checkbox) addAutoReportDebugLog("checkbox_click_failed", { product_id: productId, attempt: 1, reason: "checkbox_changed" });
     else addAutoReportDebugLog("checkbox_disabled", { attempt: 1, checkbox: describeAutoReportElement(checkbox), reason: "checkbox_changed" });
     if (await recheckAlreadyBound("checkbox_changed")) return skipAlreadyBound("checkbox_changed");
     throw new Error("该商品暂时无法勾选。");
@@ -2484,38 +2459,38 @@ async function runSingleProductAutoReport(keyword, productTitle, onStatus = null
     return currentTargetRow && isProductRowChecked(currentTargetRow);
   });
   if (checked) {
-    addAutoReportDebugLog("checkbox_checked_confirmed", { attempt: 1, title: productTitle, matched_product_id: matchedProductId });
+    addAutoReportDebugLog("checkbox_checked_confirmed", { attempt: 1, product_id: productId });
   } else {
-    addAutoReportDebugLog("checkbox_click_failed", { title: productTitle, matched_product_id: matchedProductId, attempt: 1, reason: "checked_state_not_confirmed" });
+    addAutoReportDebugLog("checkbox_click_failed", { product_id: productId, attempt: 1, reason: "checked_state_not_confirmed" });
     await waitForPageUpdate(500);
     targetRow = refreshUniqueTargetRow();
     checkbox = targetRow ? findRowCheckboxControl(targetRow) : null;
     if (!targetRow || !checkbox || !isAvailableRowCheckboxControl(checkbox)) {
       if (await recheckAlreadyBound("checkbox_retry_unavailable")) return skipAlreadyBound("checkbox_retry_unavailable");
-      addAutoReportDebugLog("checkbox_retry_failed", { attempt: 2, title: productTitle, matched_product_id: matchedProductId, reason: "checkbox_retry_unavailable" });
+      addAutoReportDebugLog("checkbox_retry_failed", { attempt: 2, product_id: productId, reason: "checkbox_retry_unavailable" });
       throw new Error("未能确认商品已选中。");
     }
     addAutoReportDebugLog("checkbox_found", { attempt: 2, checkbox: describeAutoReportElement(checkbox), source: "retry" });
     if (isProductRowChecked(targetRow)) {
-      addAutoReportDebugLog("checkbox_checked_confirmed", { attempt: 2, title: productTitle, matched_product_id: matchedProductId });
-      addAutoReportDebugLog("checkbox_retry_success", { attempt: 2, title: productTitle, matched_product_id: matchedProductId, already_checked: true });
+      addAutoReportDebugLog("checkbox_checked_confirmed", { attempt: 2, product_id: productId });
+      addAutoReportDebugLog("checkbox_retry_success", { attempt: 2, product_id: productId, already_checked: true });
     } else {
       if (findAlreadyBoundState()) {
-        addAutoReportDebugLog("already_bound_recheck_found", { title: productTitle, matched_product_id: matchedProductId, reason: "before_checkbox_retry" });
+        addAutoReportDebugLog("already_bound_recheck_found", { product_id: productId, reason: "before_checkbox_retry" });
         return skipAlreadyBound("before_checkbox_retry");
       }
       if (await recheckAlreadyBound("checked_state_not_confirmed")) return skipAlreadyBound("checked_state_not_confirmed");
-      addAutoReportDebugLog("checkbox_retry_started", { attempt: 2, title: productTitle, matched_product_id: matchedProductId });
+      addAutoReportDebugLog("checkbox_retry_started", { attempt: 2, product_id: productId });
       targetRow = refreshUniqueTargetRow();
       checkbox = targetRow ? findRowCheckboxControl(targetRow) : null;
       if (!targetRow || !checkbox || !isAvailableRowCheckboxControl(checkbox)) {
-        addAutoReportDebugLog("checkbox_retry_failed", { attempt: 2, title: productTitle, matched_product_id: matchedProductId, reason: "checkbox_changed_before_retry" });
+        addAutoReportDebugLog("checkbox_retry_failed", { attempt: 2, product_id: productId, reason: "checkbox_changed_before_retry" });
         throw new Error("未能确认商品已选中。");
       }
       addAutoReportDebugLog("checkbox_found", { attempt: 2, checkbox: describeAutoReportElement(checkbox), source: "retry_after_bound_recheck" });
       if (isProductRowChecked(targetRow)) {
-        addAutoReportDebugLog("checkbox_checked_confirmed", { attempt: 2, title: productTitle, matched_product_id: matchedProductId });
-        addAutoReportDebugLog("checkbox_retry_success", { attempt: 2, title: productTitle, matched_product_id: matchedProductId, already_checked: true });
+        addAutoReportDebugLog("checkbox_checked_confirmed", { attempt: 2, product_id: productId });
+        addAutoReportDebugLog("checkbox_retry_success", { attempt: 2, product_id: productId, already_checked: true });
       } else {
         const retryClick = clickAutoReportCheckboxControl(checkbox);
         addAutoReportDebugLog("checkbox_retry_clicked", {
@@ -2529,10 +2504,10 @@ async function runSingleProductAutoReport(keyword, productTitle, onStatus = null
           return currentTargetRow && isProductRowChecked(currentTargetRow);
         });
         if (checked) {
-          addAutoReportDebugLog("checkbox_checked_confirmed", { attempt: 2, title: productTitle, matched_product_id: matchedProductId });
-          addAutoReportDebugLog("checkbox_retry_success", { attempt: 2, title: productTitle, matched_product_id: matchedProductId });
+          addAutoReportDebugLog("checkbox_checked_confirmed", { attempt: 2, product_id: productId });
+          addAutoReportDebugLog("checkbox_retry_success", { attempt: 2, product_id: productId });
         } else {
-          addAutoReportDebugLog("checkbox_retry_failed", { attempt: 2, title: productTitle, matched_product_id: matchedProductId, reason: "checked_state_not_confirmed" });
+          addAutoReportDebugLog("checkbox_retry_failed", { attempt: 2, product_id: productId, reason: "checked_state_not_confirmed" });
           if (await recheckAlreadyBound("checkbox_retry_failed")) return skipAlreadyBound("checkbox_retry_failed");
           throw new Error("未能确认商品已选中。");
         }
@@ -2566,7 +2541,7 @@ async function runSingleProductAutoReport(keyword, productTitle, onStatus = null
   if (!submitted) throw new Error("提交后未看到成功提示。");
   addAutoReportDebugLog("success", { message: describeAutoReportElement(submitted) });
   updateStatus("提报成功。");
-  return { keyword, title: productTitle, matched_product_id: matchedProductId, success_message: submitted };
+  return { keyword, product_id: productId, success_message: submitted };
 }
 
 function collectProductOpportunityData() {
@@ -4464,7 +4439,7 @@ function installPanel() {
             <div id="autoReportTest" class="binding-search" hidden>
               <strong>自动提报（测试）</strong>
               <input id="autoReportKeyword" class="binding-input" type="text" autocomplete="off" placeholder="请输入完整关键词" style="margin-top: 9px;" />
-              <input id="autoReportTitle" class="binding-input" type="text" autocomplete="off" placeholder="请输入完整商品标题" style="margin-top: 7px;" />
+              <input id="autoReportProductId" class="binding-input" type="text" inputmode="numeric" autocomplete="off" placeholder="请输入商品 ID" style="margin-top: 7px;" />
               <div class="actions" style="margin-top: 9px;"><button id="startAutoReport" type="button">开始自动提报</button></div>
               <div id="autoReportState" class="binding-status"></div>
               <div class="binding-search" style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #e7ebf3;">
@@ -4536,7 +4511,7 @@ function installPanel() {
   const bindingLocateState = shadow.querySelector("#bindingLocateState");
   const autoReportTest = shadow.querySelector("#autoReportTest");
   const autoReportKeywordInput = shadow.querySelector("#autoReportKeyword");
-  const autoReportTitleInput = shadow.querySelector("#autoReportTitle");
+  const autoReportProductIdInput = shadow.querySelector("#autoReportProductId");
   const startAutoReportButton = shadow.querySelector("#startAutoReport");
   const exportAutoReportDebugButton = shadow.querySelector("#exportAutoReportDebug");
   const exportBatchDebugButton = shadow.querySelector("#exportBatchDebug");
@@ -4830,10 +4805,8 @@ function installPanel() {
         return;
       }
       batchReportState.textContent = `正在处理第 ${batchReportSession.current_index + 1} / ${total} 条\n已完成 ${completed} 条 · 成功 ${success} · 跳过 ${skipped} · 失败 ${failed}`;
-      const currentTitle = current?.title || "";
-      const visibleTitle = currentTitle.length > 100 ? `${currentTitle.slice(0, 97)}...` : currentTitle;
       batchReportCurrent.textContent = current
-        ? `关键词：\n${current.keyword}\n商品：\n${visibleTitle}${batchReportSession.current_status ? `\n${batchReportSession.current_status}` : ""}`
+        ? `当前：\n${current.keyword}\n${current.product_id}${batchReportSession.current_status ? `\n${batchReportSession.current_status}` : ""}`
         : "";
       return;
     }
@@ -5353,17 +5326,15 @@ function installPanel() {
           batch_index: index + 1,
           batch_total: batchReportSession.tasks.length,
           keyword: task.keyword,
-          title: task.title,
-          matched_product_id: null
+          product_id: task.product_id
         };
         addAutoReportDebugLog("start");
         renderBinding();
         try {
-          const result = await runSingleProductAutoReport(task.keyword, task.title, (status) => {
+          const result = await runSingleProductAutoReport(task.keyword, task.product_id, (status) => {
             batchReportSession.current_status = status;
             renderBinding();
           }, { deferBatchRecovery: true });
-          task.matched_product_id = result.matched_product_id || null;
           if (result.skipped) {
             task.status = "skipped";
             task.error = result.skip_reason || "商品已绑定";
@@ -5657,24 +5628,24 @@ function installPanel() {
   });
   startAutoReportButton.addEventListener("click", async () => {
     const keyword = compactOpportunityText(autoReportKeywordInput.value);
-    const title = String(autoReportTitleInput.value || "").trim();
+    const productId = compactOpportunityText(autoReportProductIdInput.value);
     if (!keyword) {
       autoReportState.textContent = "请输入关键词。";
       return;
     }
-    if (!title) {
-      autoReportState.textContent = "请输入完整商品标题。";
+    if (!productId) {
+      autoReportState.textContent = "请输入商品 ID。";
       return;
     }
     if (autoReportBusy || batchReportBusy) return;
     resetAutoReportDebugLog();
     window.__crawlHubAutoReportDebugContext = null;
-    addAutoReportDebugLog("start", { keyword, title, matched_product_id: null });
+    addAutoReportDebugLog("start", { keyword, product_id: productId });
     autoReportBusy = true;
     autoReportState.textContent = "正在准备提报...";
     renderBinding();
     try {
-      await runSingleProductAutoReport(keyword, title, (status) => {
+      await runSingleProductAutoReport(keyword, productId, (status) => {
         autoReportState.textContent = status;
       });
     } catch (error) {
