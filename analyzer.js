@@ -44,6 +44,78 @@ function inspectScrollableElements(target = null, limit = 30) {
     .slice(0, limit);
 }
 
+function autoSampleInteractiveElements() {
+  const selector = "button, a[href], input:not([type='hidden']), select, textarea, summary, [contenteditable='true'], [role='button'], [role='link'], [role='tab'], [role='menuitem'], [role='checkbox'], [role='radio'], [role='switch'], [aria-haspopup], [onclick], [tabindex]";
+  const compact = (value, limit = 160) => String(value || "").replace(/\s+/g, " ").trim().slice(0, limit);
+  const selectorFor = (element) => {
+    const parts = [];
+    for (let current = element; current && current.nodeType === Node.ELEMENT_NODE && parts.length < 6; current = current.parentElement) {
+      let part = current.tagName.toLowerCase();
+      if (current.id) part += `#${CSS.escape(current.id)}`;
+      else if (current.classList.length) part += Array.from(current.classList).slice(0, 2).map((name) => `.${CSS.escape(name)}`).join("");
+      parts.unshift(part);
+    }
+    return parts.join(" > ");
+  };
+  const semanticCandidates = Array.from(document.querySelectorAll(selector));
+  const pointerCandidates = Array.from(document.querySelectorAll("div, span, font")).slice(0, 5000)
+    .filter((element) => getComputedStyle(element).cursor === "pointer"
+      && getComputedStyle(element.parentElement || document.documentElement).cursor !== "pointer");
+  const candidates = Array.from(new Set([...semanticCandidates, ...pointerCandidates]));
+  const groups = new Map();
+  let eligibleCount = 0;
+  for (const element of candidates) {
+    if (element === window.__crawlHubPanelHost || !isVisiblePageElement(element) || element.disabled || element.getAttribute("aria-disabled") === "true") continue;
+    if (element.hasAttribute("tabindex") && element.tabIndex < 0 && !element.matches("button, a[href], input, select, textarea, summary, [contenteditable='true'], [role], [aria-haspopup], [onclick]")) continue;
+    const role = element.getAttribute("role") || ({ A: "link", BUTTON: "button", INPUT: "input", SELECT: "select", TEXTAREA: "textbox", SUMMARY: "disclosure" }[element.tagName] || "interactive");
+    const label = compact(element.getAttribute("aria-label") || element.labels?.[0]?.innerText || element.getAttribute("title") || element.getAttribute("alt") || element.getAttribute("placeholder") || element.querySelector("svg title")?.textContent || element.innerText || element.textContent || (["button", "submit", "reset"].includes(element.type) ? element.value : ""));
+    if (!label) continue;
+    eligibleCount += 1;
+    const contextRoot = element.closest("tr, li, [role='row'], [role='listitem'], article, section");
+    const context = compact(contextRoot?.innerText || contextRoot?.textContent || element.parentElement?.innerText || "", 220);
+    let href = null;
+    if (element.hasAttribute("href")) {
+      try {
+        const url = new URL(element.getAttribute("href"), location.href);
+        if (["http:", "https:"].includes(url.protocol)) href = `${url.origin}${url.pathname}`;
+      } catch { /* Non-URL controls still have a usable label and selector. */ }
+    }
+    const key = `${element.tagName}|${role}|${label}`;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.similar_count += 1;
+      if (existing.examples.length < 3 && !existing.examples.some((item) => item.context === context && item.href === href)) {
+        existing.examples.push({ context, href });
+      }
+      continue;
+    }
+    groups.set(key, {
+      source: "automatic",
+      tag: element.tagName.toLowerCase(),
+      role,
+      label,
+      selector: selectorFor(element),
+      context,
+      href,
+      similar_count: 1,
+      examples: [{ context, href }]
+    });
+  }
+  const priority = (item) => item.role === "link" ? 1 : 0;
+  const allGroups = Array.from(groups.values()).sort((a, b) => priority(a) - priority(b));
+  const items = allGroups.slice(0, 200);
+  const result = {
+    page_url: location.href,
+    sampled_at: new Date().toISOString(),
+    candidate_count: eligibleCount,
+    group_count: allGroups.length,
+    omitted_group_count: Math.max(0, allGroups.length - items.length),
+    items
+  };
+  window.__crawlHubAutoSampling = result;
+  return result;
+}
+
 function analyzePage() {
   const LIMITS = {
     textNodes: 2000,
@@ -323,8 +395,13 @@ function analyzePage() {
     },
     selected_element: selectedElements[0] || null,
     selected_elements: selectedElements,
+    auto_sampled_elements: window.__crawlHubAutoSampling?.page_url === location.href ? window.__crawlHubAutoSampling.items : [],
     sampling: {
       selected_count: selectedElements.length,
+      auto_count: window.__crawlHubAutoSampling?.page_url === location.href ? window.__crawlHubAutoSampling.items.length : 0,
+      auto_candidate_count: window.__crawlHubAutoSampling?.page_url === location.href ? window.__crawlHubAutoSampling.candidate_count : 0,
+      auto_omitted_group_count: window.__crawlHubAutoSampling?.page_url === location.href ? window.__crawlHubAutoSampling.omitted_group_count : 0,
+      auto_sampled_at: window.__crawlHubAutoSampling?.page_url === location.href ? window.__crawlHubAutoSampling.sampled_at : null,
       mode: window.__crawlHubSamplingState || (window.__crawlHubSamplingActive ? "sampling" : "idle")
     },
     text_nodes: { items: textNodes, count: textNodes.length, omitted_count: omittedTextNodes },
@@ -3757,6 +3834,7 @@ function startElementSampling() {
     return types;
   };
   const describe = (element) => ({
+    source: "manual",
     tag: element.tagName.toLowerCase(),
     class: compactText(element.className, 240),
     id: element.id || null,
@@ -4379,15 +4457,16 @@ function installPanel() {
           <button id="productDetailMode" type="button">商品采集</button>
         </div>
         <div id="analysisView" class="view">
-          <div class="state">当前状态：<span id="state">待机</span></div>
-          <div class="count">已选择元素：<strong id="count">0</strong></div>
-          <div id="fieldSummary" class="field-summary">已选择字段摘要：暂无</div>
+          <div class="state">手动采样状态：<span id="state">待机</span></div>
+          <div class="count">手动采样：<strong id="count">0</strong> · 自动采样：<strong id="autoCount">0</strong></div>
+          <div id="fieldSummary" class="field-summary">手动选择的字段：暂无</div>
           <ul id="samples" class="samples"></ul>
           <div class="actions">
+            <button id="autoSample" type="button">一键自动采样当前页</button>
             <button id="sample">开始元素采样</button>
             <button id="pauseSampling" class="secondary" hidden>暂停采样</button>
             <button id="resumeSampling" class="secondary" hidden>继续采样</button>
-            <button id="cancelSampling" class="secondary" hidden>取消采样</button>
+            <button id="cancelSampling" class="secondary" hidden>取消手动采样</button>
             <button id="observe" class="secondary">监听后续网络请求</button>
             <button id="analyze" class="secondary">分析并下载 analysis.json</button>
           </div>
@@ -4548,8 +4627,10 @@ function installPanel() {
   const clearCollectionDataButton = shadow.querySelector("#clearCollectionData");
   const stateText = shadow.querySelector("#state");
   const countText = shadow.querySelector("#count");
+  const autoCountText = shadow.querySelector("#autoCount");
   const fieldSummary = shadow.querySelector("#fieldSummary");
   const samples = shadow.querySelector("#samples");
+  const autoSampleButton = shadow.querySelector("#autoSample");
   const sampleButton = shadow.querySelector("#sample");
   const pauseSamplingButton = shadow.querySelector("#pauseSampling");
   const resumeSamplingButton = shadow.querySelector("#resumeSampling");
@@ -5032,18 +5113,19 @@ function installPanel() {
   const render = () => {
     const selected = Array.isArray(window.__crawlHubSelectedElements) ? window.__crawlHubSelectedElements : [];
     countText.textContent = String(selected.length);
+    autoCountText.textContent = String(window.__crawlHubAutoSampling?.page_url === location.href ? window.__crawlHubAutoSampling.items.length : 0);
     const samplingState = window.__crawlHubSamplingState || (window.__crawlHubSamplingActive ? "sampling" : "idle");
     stateText.textContent = samplingState === "sampling" ? "元素采样中" : samplingState === "paused" ? "已暂停" : "待机";
     stateText.dataset.samplingState = samplingState;
     const fields = Array.from(new Set(selected.flatMap((item) => item.possible_field_types || [])));
-    fieldSummary.textContent = `已选择字段摘要：${fields.length ? fields.join("、") : "暂无"}`;
+    fieldSummary.textContent = `手动选择的字段：${fields.length ? fields.join("、") : "暂无"}`;
     samples.replaceChildren();
     selected.forEach((item, index) => {
       const row = document.createElement("li");
       row.textContent = `${index + 1}. ${item.tag} · ${item.possible_field_types?.join("/") || "text"} · ${item.text || item.selector}`;
       samples.appendChild(row);
     });
-    sampleButton.textContent = samplingState === "idle" ? "开始元素采样" : "完成采样并生成报告";
+    sampleButton.textContent = samplingState === "idle" ? "开始手动采样" : "完成手动采样";
     sampleButton.disabled = samplingState === "paused";
     pauseSamplingButton.hidden = samplingState !== "sampling";
     resumeSamplingButton.hidden = samplingState !== "paused";
@@ -5883,13 +5965,22 @@ function installPanel() {
     if (window.__crawlHubSamplingState === "sampling") {
       stopElementSampling();
       render();
-      downloadReport();
+      setMessage("手动采样已完成，点击“分析并下载”可与页面分析一起导出。", "success");
       return;
     }
     if (window.__crawlHubSamplingState === "paused") return;
     startElementSampling();
     render();
     setMessage("采样中：可点击页面元素；需要移动页面时点击“暂停采样”。");
+  });
+  autoSampleButton.addEventListener("click", () => {
+    try {
+      const result = autoSampleInteractiveElements();
+      render();
+      setMessage(`已自动识别 ${result.candidate_count} 个交互项，整理为 ${result.items.length} 组；点击“分析并下载”合并导出。`, "success");
+    } catch (error) {
+      setMessage(`自动采样失败：${error.message || "无法读取页面交互项"}`, "error");
+    }
   });
   pauseSamplingButton.addEventListener("click", () => {
     const result = pauseElementSampling();
@@ -5913,7 +6004,11 @@ function installPanel() {
     }
   });
   analyzeButton.addEventListener("click", () => {
-    try { downloadReport(); } catch (error) { setMessage(`分析失败：${error.message || "无法生成报告"}`, "error"); }
+    try {
+      if (["sampling", "paused"].includes(window.__crawlHubSamplingState)) stopElementSampling();
+      render();
+      downloadReport();
+    } catch (error) { setMessage(`分析失败：${error.message || "无法生成报告"}`, "error"); }
   });
   shadow.querySelector("#minimize").addEventListener("click", () => {
     content.hidden = !content.hidden;
